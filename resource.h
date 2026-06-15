@@ -1,0 +1,8 @@
+#pragma once
+
+#define IDR_PNG_EFI_CHECKER  201
+#define IDR_PNG_EMU_CHECKER  202
+#define IDR_PNG_WINSCAN      203
+#define IDR_PNG_KERNEL_SCAN  204
+#define IDR_PNG_GENERAL      205
+#define IDR_PNG_SYSMON       206

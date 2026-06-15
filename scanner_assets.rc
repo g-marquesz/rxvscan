@@ -1,0 +1,8 @@
+#include "resource.h"
+
+IDR_PNG_EFI_CHECKER RCDATA "assets\\efi-checker.png"
+IDR_PNG_EMU_CHECKER RCDATA "assets\\emu-checker.png"
+IDR_PNG_WINSCAN RCDATA "assets\\winscan.png"
+IDR_PNG_KERNEL_SCAN RCDATA "assets\\kernel-scan.png"
+IDR_PNG_GENERAL RCDATA "assets\\general.png"
+IDR_PNG_SYSMON RCDATA "assets\\sysmon.png"
