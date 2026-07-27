@@ -143,7 +143,7 @@ bool RTCoreDriver::Load(const std::wstring& driverPath) {
     scmHandle = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!scmHandle) return false;
 
-    // Stop and delete any existing service first
+
     SC_HANDLE oldSvc = OpenServiceW(scmHandle, kRTCoreServiceName, SERVICE_STOP | DELETE);
     if (oldSvc) {
         SERVICE_STATUS ss = {};
@@ -363,7 +363,7 @@ bool RTCoreDriver::GetKernelPhysicalBase(uint64_t& kernelPhysBase) {
     }
     if (!kernelVirtBase || kernelPath.empty()) return false;
 
-    // Read kernel PE headers from disk to get SizeOfImage
+
     HANDLE hFile = CreateFileW(kernelPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
@@ -382,14 +382,14 @@ bool RTCoreDriver::GetKernelPhysicalBase(uint64_t& kernelPhysBase) {
     DWORD sizeOfImage = nt->OptionalHeader.SizeOfImage;
     DWORD sizeOfHeaders = nt->OptionalHeader.SizeOfHeaders;
 
-    // Search physical memory for kernel image by MZ/PE signature
+
     std::vector<RTCoreMemRange> ranges;
     if (!GetPhysicalMemoryRanges(ranges)) {
         ranges.push_back({ 0x1000, 0x4000000 });
     }
 
-    // Scan low physical memory (first 2GB) where the kernel is always loaded.
-    // Read in 1MB chunks and check each 4KB page boundary within the chunk.
+
+
     uint8_t chunkBuf[0x100000];
     for (const auto& range : ranges) {
         if (range.base > 0x80000000ULL) continue;
@@ -433,7 +433,7 @@ static std::vector<DWORD> GetKnownPids() {
         CloseHandle(snap);
     }
 
-    // NtQuerySystemInformation(SystemProcessInformation)
+
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto NtQuerySysInfo = ntdll
         ? reinterpret_cast<LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG)>(
@@ -465,11 +465,6 @@ static std::vector<DWORD> GetKnownPids() {
     return pids;
 }
 
-// Scan physical memory pages for EPROCESS structures by pattern matching.
-// EPROCESS structures have identifying fields at known offsets:
-//   - ActiveProcessLinks: two valid kernel pointers
-//   - PID: reasonable value (0 < pid < 65536)
-//   - ImageFileName: printable ASCII string up to 15 chars
 std::vector<HiddenEprocessFinding> RTCoreDriver::FindHiddenProcesses() {
     std::vector<HiddenEprocessFinding> findings;
     if (!IsLoaded()) return findings;
@@ -491,9 +486,9 @@ std::vector<HiddenEprocessFinding> RTCoreDriver::FindHiddenProcesses() {
         for (uint64_t pa = range.base; pa < end; pa += 0x1000) {
             if (!ReadPhysicalMemory(pa, page, sizeof(page))) continue;
 
-            // Check if this page might contain EPROCESS structures
-            // EPROCESS is typically at page-aligned addresses in non-paged pool
-            // Check at offset 0 of the page for an EPROCESS with valid LIST_ENTRY
+
+
+
 
             uint64_t flink = *reinterpret_cast<uint64_t*>(page + kEprocessOffsets.activeProcessLinks);
             uint64_t blink = *reinterpret_cast<uint64_t*>(page + kEprocessOffsets.activeProcessLinks + 8);
@@ -617,7 +612,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
 
     std::wstring kernelPath = FindNtkrnlPath();
 
-    // Read kernel file from disk
+
     HANDLE hFile = CreateFileW(kernelPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return findings;
@@ -654,7 +649,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
     if (textSize == 0) textSize = textSection->Misc.VirtualSize;
     if (textSize == 0 || textSize > 0x400000) return findings;
 
-    // Read .text section from physical memory at VirtualAddress offset
+
     uint64_t textPhysBase = kernelPhysBase + textVirtualAddr;
     std::vector<uint8_t> physText(textSize);
 
@@ -669,7 +664,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
 
     if (offset < textSize) return findings;
 
-    // Compare .text section: disk (at PointerToRawData) vs physical (at VirtualAddress)
+
     DWORD diskTextRva = textSection->PointerToRawData;
     DWORD diskTextSize = textSection->SizeOfRawData;
     if (diskTextSize == 0 || diskTextSize > textSize) diskTextSize = textSize;
@@ -716,7 +711,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
     f.detail = std::string(detail);
     f.suspicious = true;
 
-    // Check specific critical functions for prologue changes
+
     struct CriticalFunc {
         const char* name;
         int minPrologueLen;
@@ -742,17 +737,17 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
         { "NtQueryDirectoryFile", 4 },
     };
 
-    // Compare the on-disk prologue against the physical memory prologue for each function
+
     char hookedList[512] = {};
     int hpos = 0;
     for (const auto& cf : criticalFuncs) {
         DWORD rva = ReadKernelExportRva(kernelPath, cf.name);
         if (!rva) continue;
 
-        // Read expected first bytes from disk image
+
         DWORD diskFuncRva = rva;
-        // The function's code in the file is at: PointerToRawData of its section
-        // We need to map RVA to file offset
+
+
         DWORD fileOffset = 0;
         for (WORD i = 0; i < numSections; ++i) {
             DWORD start = sections[i].VirtualAddress;
@@ -768,7 +763,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
         if (fileOffset + 8 > diskImage.size()) continue;
         memcpy(expectedPrologue, diskImage.data() + fileOffset, 8);
 
-        // Read actual prologue from physical memory
+
         uint8_t physPrologue[8] = {};
         uint64_t funcPhys = kernelPhysBase + rva;
         if (!ReadPhysicalMemory(funcPhys, physPrologue, sizeof(physPrologue))) continue;
@@ -788,15 +783,11 @@ std::vector<ScannerUI::KernelAnomalyFinding> RTCoreDriver::VerifyKernelIntegrity
     return findings;
 }
 
-// Scan physical memory for stream manipulation indicators:
-// 1) Hook trampoline patterns in executable pages (JMP/MOV RAX/PUSH+RET)
-// 2) Hidden layered overlay windows visible from physical memory but not EnumWindows
-// 3) Capture bypass structures in graphics memory
 std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() {
     std::vector<ScannerUI::StreamModFinding> findings;
     if (!IsLoaded()) return findings;
 
-    // Enumerate user-mode visible windows for cross-reference
+
     struct EnumCtx { std::unordered_set<HWND> visible; };
     EnumCtx ctx;
     EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
@@ -813,9 +804,9 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
     int hiddenOverlayCount = 0;
     uint8_t chunk[0x100000];
 
-    // Scan physical memory for hook patterns and overlay structures
+
     for (const auto& range : memRanges) {
-        if (range.base > 0x40000000ULL) continue; // focus on first 1GB
+        if (range.base > 0x40000000ULL) continue;
         uint64_t end = range.base + range.size;
         if (end > 0x40000000ULL) end = 0x40000000ULL;
         for (uint64_t pa = range.base; pa < end; pa += sizeof(chunk)) {
@@ -826,8 +817,8 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
             for (DWORD pi = 0; pi < pages; ++pi) {
                 uint8_t* page = chunk + (pi * 0x1000);
 
-                // Scan for inline hook trampolines in executable pages
-                // JMP rel32 (E9 xx xx xx xx)
+
+
                 for (size_t off = 0; off < 0x1000 - 5; ++off) {
                     if (page[off] == 0xE9) {
                         int32_t jmpOff = *reinterpret_cast<int32_t*>(page + off + 1);
@@ -840,7 +831,7 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
                             break;
                         }
                     }
-                    // MOV RAX,imm64; JMP RAX (48 B8 .. FF E0)
+
                     if (off + 14 <= 0x1000 &&
                         page[off] == 0x48 && page[off+1] == 0xB8 &&
                         page[off+12] == 0xFF && page[off+13] == 0xE0) {
@@ -853,7 +844,7 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
                             break;
                         }
                     }
-                    // PUSH imm32; RET (68 xx xx xx xx C3)
+
                     if (off + 6 <= 0x1000 && page[off] == 0x68 && page[off+5] == 0xC3) {
                         uint32_t target32 = *reinterpret_cast<uint32_t*>(page + off + 1);
                         if (target32 > 0x10000 && target32 < 0x7FFFFFFF) {
@@ -866,9 +857,9 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
                     }
                 }
 
-                // Scan for hidden overlay window structures in desktop heap
-                // Desktop heap contains tagWND structs with WS_EX_LAYERED | WS_EX_TRANSPARENT flags
-                // Typical tagWND extended style offset within struct: look for 0x80000 (WS_EX_LAYERED)
+
+
+
                 if (!foundHiddenOverlays) {
                     for (size_t off = 0; off < 0x1000 - 16; off += 8) {
                         uint32_t exStyle = *reinterpret_cast<uint32_t*>(page + off);
@@ -920,10 +911,7 @@ std::vector<ScannerUI::StreamModFinding> RTCoreDriver::FindStreamModAnomalies() 
     return findings;
 }
 
-// Scan HD-Player physical memory in the 0xF-0xFFFAC range.
-// Uses VirtualQueryEx + ReadProcessMemory to detect allocated regions,
-// plus handle table analysis via NtQuerySystemInformation.
-// Cross-references with RTCore64 physical reads for hidden region detection.
+
 std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory() {
     std::vector<ScannerUI::EmulatorFinding> findings;
     if (!IsLoaded()) return findings;
@@ -960,7 +948,7 @@ std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory
     const uint64_t kScanStart = 0xF;
     const uint64_t kScanEnd = 0xFFFAC;
 
-    // Enumerate committed memory in target range via VirtualQueryEx
+
     std::vector<std::pair<uint64_t, uint64_t>> committedRegions;
     uint8_t* addr = (uint8_t*)kScanStart;
     while ((uint64_t)addr < kScanEnd) {
@@ -983,13 +971,13 @@ std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory
         return findings;
     }
 
-    // Read committed regions and scan for suspicious content
+
     size_t totalBytes = 0;
     size_t suspiciousCount = 0;
     for (const auto& region : committedRegions) {
         uint64_t start = region.first;
         uint64_t size = region.second;
-        if (size > 0x100000) size = 0x100000; // cap per region
+        if (size > 0x100000) size = 0x100000;
 
         std::vector<uint8_t> buf((size_t)size);
         SIZE_T nRead = 0;
@@ -997,7 +985,7 @@ std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory
             continue;
         totalBytes += nRead;
 
-        // Check for MZ/PE header (manual mapping / injected DLL)
+
         if (nRead >= 2 && buf[0] == 'M' && buf[1] == 'Z') {
             auto* dosH = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
             if (dosH->e_lfanew > 0 && dosH->e_lfanew < (int)nRead - 4) {
@@ -1018,7 +1006,7 @@ std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory
             }
         }
 
-        // Check for shellcode patterns
+
         bool hasRdtsc = false, hasPebWalk = false;
         for (DWORD i = 0; i + 4 < nRead && !(hasRdtsc && hasPebWalk); ++i) {
             if (buf[i] == 0x0F && buf[i+1] == 0x31) hasRdtsc = true;
@@ -1043,7 +1031,7 @@ std::vector<ScannerUI::EmulatorFinding> RTCoreDriver::ScanHdPlayerPhysicalMemory
         }
     }
 
-    // Handle table analysis for HD-Player via NtQuerySystemInformation
+
     {
         auto& snapshot = GetSystemHandleSnapshot();
         if (snapshot.ok) {

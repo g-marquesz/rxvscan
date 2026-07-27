@@ -58,20 +58,20 @@ static void CollectBamFromKey(HKEY root, const wchar_t* subkey, const FILETIME& 
                 reason = "DELETED";
                 note = "removed after boot";
             } else {
-                // Check for file replacement: BAM recorded an earlier run,
-                // but the file on disk was written after that run timestamp.
+
+
                 WIN32_FILE_ATTRIBUTE_DATA fad = {};
                 bool gotAttribs = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) != 0;
                 if (gotAttribs) {
                     ULONGLONG lastWrite = FileTimeToU64(fad.ftLastWriteTime);
                     ULONGLONG bamTs     = FileTimeToU64(lastRun);
-                    // Require at least 6 hours delta to avoid false positives from
-                    // Windows Update or app auto-updates touching the file shortly after run.
+
+
                     constexpr ULONGLONG k6Hours = 6ULL * 60 * 60 * 10000000ULL;
                     if (bamTs > 0 && lastWrite > bamTs && (lastWrite - bamTs) > k6Hours) {
-                        // File on disk is significantly newer than BAM-recorded execution.
-                        // Skip if the replacement file is Authenticode-signed — this covers
-                        // legitimate software updates (Steam, Epic, game launchers, etc.).
+
+
+
                         if (DetectionFilter::IsTrustedSignedCached(path))
                             continue;
                         reason = "REPLACED";
@@ -91,7 +91,7 @@ static void CollectBamFromKey(HKEY root, const wchar_t* subkey, const FILETIME& 
                 if (IsAuthenticodeSigned(path))
                     continue;
 
-                // Use multi-sample entropy for files > 512 KB for better accuracy
+
                 LONGLONG fileSize = 0;
                 if (gotAttribs) {
                     fileSize = ((LONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
@@ -103,11 +103,11 @@ static void CollectBamFromKey(HKEY root, const wchar_t* subkey, const FILETIME& 
 
                 bool userProfileUnsigned = (cls == DetectionFilter::PathClass::UserProfile);
                 if (DetectionFilter::IsTrustedDir(cls) && !packed) {
-                    // Unsigned & not catalog-signed inside System32/Program Files is unusual
-                    // (genuine Windows/vendor binaries are always signed or cataloged), but
-                    // low-entropy/unpacked third-party DLLs do exist there. Surface at low
-                    // severity instead of dropping it — a malicious binary placed here with
-                    // admin rights must not vanish from the report entirely.
+
+
+
+
+
                     ScannerUI::BamEntry entry;
                     FileTimeToLocalStrings(lastRun, entry.date, entry.time);
                     entry.path = WideToUtf8(path);
@@ -119,8 +119,8 @@ static void CollectBamFromKey(HKEY root, const wchar_t* subkey, const FILETIME& 
                     out.push_back(entry);
                     continue;
                 }
-                // Unsigned files in UserProfile are common (indie games, dev tools, launchers).
-                // Only flag if packed OR entropy is meaningfully elevated (>= 5.5).
+
+
                 constexpr double kUserProfileMinEntropy = 5.5;
                 if (userProfileUnsigned && !packed && entropy < kUserProfileMinEntropy)
                     continue;
@@ -277,8 +277,7 @@ static bool ContainsAnyToken(const std::wstring& text, std::initializer_list<con
     return false;
 }
 
-// Like ContainsAnyToken but requires each token to be bounded by a non-alpha character
-// (dot, dash, underscore, start/end of string). Use for short ambiguous tokens.
+
 static bool ContainsWholeWordToken(const std::wstring& text, std::initializer_list<const wchar_t*> tokens) {
     std::wstring upper = ToUpperInvariant(text);
     for (const wchar_t* token : tokens) {
@@ -338,11 +337,11 @@ static void CollectEfiFilesRecursive(const std::wstring& dir, std::vector<EfiFil
         if (HasEfiExtension(name)) {
             out.push_back({ full, data });
         } else if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            // Bug 4 fix: bootkits podem usar extensoes nao-.efi (.bin, .dat, sem extensao)
-            // para escapar da varredura por extensao. Incluir qualquer arquivo no ESP cujos
-            // 2 primeiros bytes sejam 'MZ' — o magic number de PE executaveis.
-            // Extensoes Windows padrao (.dll, .mui, .sys, etc.) sao arquivos de suporte do
-            // Windows no ESP — nao sao UEFI executaveis e nunca sao usadas por bootkits.
+
+
+
+
+
             {
                 std::wstring nameUpper = ToUpperInvariant(name);
                 auto dot = nameUpper.rfind(L'.');
@@ -386,11 +385,7 @@ static void AddEfiRootIfPresent(const std::wstring& root, std::vector<std::wstri
         roots.push_back(efiRoot);
 }
 
-// Returns the path of fileName inside C:\Windows\Boot\EFI (where bcdboot stages
-// bootmgfw.efi/bootmgr.efi/memtest.efi before copying them to the EFI System
-// Partition), or empty if no such reference file exists. Most ESP candidates
-// (vendor/shim/grub/dual-boot files) simply have no counterpart here, so callers
-// only pay for a hash comparison when a real reference is found.
+
 static std::wstring FindWindowsBootEfiReference(const std::wstring& fileName) {
     std::wstring refDir  = JoinPathW(JoinPathW(JoinPathW(GetWindowsDriveRoot(), L"Windows"), L"Boot"), L"EFI");
     std::wstring refPath = JoinPathW(refDir, fileName);
@@ -519,8 +514,8 @@ static void CollectBootIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>
 
 
 
-    // Bug 3 fix: bootx64.efi e o fallback universal do UEFI firmware e alvo
-    // frequente de bootkits (ex: BlackLotus). Adicionar a verificacao de signer.
+
+
     static const wchar_t* kCheckIssuer[] = { L"bootmgfw.efi", L"bootx64.efi", nullptr };
 
     for (const auto& efiDir : efiBootDirs) {
@@ -530,9 +525,9 @@ static void CollectBootIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>
                 continue;
 
 
-            // Bug 1 fix: arquivo de boot nao-assinado e um indicador critico.
-            // Anteriormente o continue aqui fazia o scanner ignorar silenciosamente
-            // uma substituicao nao-assinada do bootmgfw.efi — o caso mais comum de bootkit.
+
+
+
             if (!IsAuthenticodeSigned(efiFile)) {
                 ScannerUI::EfiCheatFinding f;
                 f.date = date;
@@ -731,9 +726,7 @@ static std::wstring ParseBootEntryFilePath(const uint8_t* buf, DWORD bufLen) {
 }
 
 
-// Returns markers like "[PXE-IPv4]", "[HTTP-Boot:http://...]", "[MAC:aabbccddeeff]"
-// for any Messaging device path nodes (type 0x03) found in the EFI_LOAD_OPTION buffer.
-// An empty return means no network boot nodes were detected.
+
 static std::wstring ParseBootEntryNetworkPath(const uint8_t* buf, DWORD bufLen) {
     if (bufLen < 6) return L"";
 
@@ -762,7 +755,7 @@ static std::wstring ParseBootEntryNetworkPath(const uint8_t* buf, DWORD bufLen) 
             } else if (nodeSubType == 0x0D) {
                 nodeDesc = L"[PXE-IPv6]";
             } else if (nodeSubType == 0x0B && nodeLen >= 10) {
-                // MAC Address: 32-byte padded field at offset +4; first 6 bytes are Ethernet MAC
+
                 nodeDesc = L"[MAC:";
                 wchar_t hex[3];
                 for (int b = 0; b < 6; ++b) {
@@ -771,7 +764,7 @@ static std::wstring ParseBootEntryNetworkPath(const uint8_t* buf, DWORD bufLen) 
                 }
                 nodeDesc += L"]";
             } else if (nodeSubType == 0x18) {
-                // URI Device Path: ASCII URI string after 4-byte header
+
                 nodeDesc = L"[HTTP-Boot";
                 if (nodeLen > 4) {
                     std::string uri(reinterpret_cast<const char*>(buf + pos + 4), nodeLen - 4);
@@ -845,7 +838,7 @@ bool IsSecureBootEnabled() {
     if (rd == 1 && val == 0)
         return false;
 
-    // Firmware variable inacessivel (sem privilegio/BIOS legada) — fallback ao registro
+
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                       L"SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State",
@@ -861,8 +854,8 @@ bool IsSecureBootEnabled() {
 }
 
 bool IsIommuEnabled() {
-    // Presenca da tabela ACPI DMAR (Intel VT-d) ou IVRS (AMD-Vi) indica que o
-    // IOMMU esta habilitado na firmware e exposto ao SO.
+
+
     const DWORD kDmar = ('D') | ('M' << 8) | ('A' << 16) | ('R' << 24);
     const DWORD kIvrs = ('I') | ('V' << 8) | ('R' << 16) | ('S' << 24);
     if (GetSystemFirmwareTable('ACPI', kDmar, nullptr, 0) > 0) return true;
@@ -876,8 +869,8 @@ bool IsIommuEnabled() {
 static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out) {
     const wchar_t* kEfiGuid = L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 
-    // Privilegio SE_SYSTEM_ENVIRONMENT_NAME e necessario para ler variaveis UEFI;
-    // habilitamos aqui pois IsSecureBootEnabled so e chamada depois das leituras abaixo.
+
+
     EnableFirmwareEnvPrivilege();
 
     uint16_t bootOrder[128] = {};
@@ -895,7 +888,7 @@ static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out
     std::string date, timeStr;
     FileTimeToLocalStrings(now, date, timeStr);
 
-    // Check BootNext: one-shot boot override used by bootkits to persist across reboots
+
     {
         uint16_t bootNextId = 0;
         DWORD bnRead = GetFirmwareEnvironmentVariableW(L"BootNext", kEfiGuid,
@@ -972,7 +965,7 @@ static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out
 
         std::wstring filePath = ParseBootEntryFilePath(optBuf, optRead);
 
-        // Network boot detection — PXE/HTTP Boot device path nodes indicate OS loaded from network
+
         {
             std::wstring netPath = ParseBootEntryNetworkPath(optBuf, optRead);
             if (!netPath.empty()) {
@@ -1074,22 +1067,15 @@ static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out
     }
 }
 
-// ─── Secure Boot key stores: comparacao com as chaves de fabrica da placa-mae ───
-//
-// Bypass comum: manter o Secure Boot LIGADO mas registrar uma PK/KEK/db propria e
-// assinar o bootkit com ela — os checks de "Secure Boot ativo" continuam verdes
-// enquanto o firmware confia em codigo do atacante. O firmware expoe as chaves de
-// fabrica nas variaveis somente-leitura PKDefault/KEKDefault/dbDefault/dbxDefault;
-// qualquer entrada atual fora desses defaults (e fora dos certs que a Microsoft
-// adiciona legitimamente via Windows Update) indica chave alterada.
+
 
 static const wchar_t* kEfiGlobalGuid   = L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 static const wchar_t* kEfiImageSecGuid = L"{d719b2cb-3d3a-4596-a3bc-dad00e67656f}";
 
 struct EfiSigEntry {
     bool        isX509 = false;
-    std::string sha256;   // hex do payload (DER do cert ou hash revogado)
-    std::string cn;       // subject CN quando X.509
+    std::string sha256;
+    std::string cn;
 };
 
 static std::string ToUpperAscii(const std::string& s) {
@@ -1111,7 +1097,7 @@ static std::vector<uint8_t> ReadUefiVariable(const wchar_t* name, const wchar_t*
             buf.resize(rd);
             return buf;
         }
-        // dbx atualizado pelo Windows Update passa de 100 KB — cresce ate 1 MB
+
         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && cap < (1u << 20)) {
             cap *= 2;
             continue;
@@ -1126,9 +1112,9 @@ static std::vector<EfiSigEntry> ParseEfiSignatureLists(const std::vector<uint8_t
 
     std::vector<EfiSigEntry> entries;
     const size_t total = buf.size();
-    // EFI_SIGNATURE_LIST: GUID(16) + ListSize(4) + HeaderSize(4) + SignatureSize(4)
+
     constexpr size_t kListHdr   = 28;
-    constexpr size_t kOwnerGuid = 16; // EFI_SIGNATURE_DATA comeca com o GUID SignatureOwner
+    constexpr size_t kOwnerGuid = 16;
     size_t pos = 0;
     while (pos + kListHdr <= total) {
         GUID type = {};
@@ -1138,7 +1124,7 @@ static std::vector<EfiSigEntry> ParseEfiSignatureLists(const std::vector<uint8_t
         memcpy(&headerSize, buf.data() + pos + 20, sizeof(uint32_t));
         memcpy(&sigSize,    buf.data() + pos + 24, sizeof(uint32_t));
 
-        // Campos de tamanho vem da NVRAM e podem estar corrompidos — nunca ler alem do buffer
+
         if (listSize < kListHdr || listSize > total - pos ||
             headerSize > listSize - kListHdr || sigSize <= kOwnerGuid)
             break;
@@ -1171,8 +1157,8 @@ static std::vector<EfiSigEntry> ParseEfiSignatureLists(const std::vector<uint8_t
 }
 
 static bool IsMicrosoftSecureBootCn(const std::string& cn) {
-    // Certs que o Windows Update adiciona legitimamente ao KEK/db — nao podem alertar
-    // mesmo quando ausentes dos defaults de fabrica (placas antigas nao os incluem).
+
+
     static const char* kMsCns[] = {
         "MICROSOFT WINDOWS PRODUCTION PCA 2011",
         "MICROSOFT CORPORATION UEFI CA 2011",
@@ -1191,9 +1177,9 @@ static bool IsMicrosoftSecureBootCn(const std::string& cn) {
 }
 
 static bool IsKnownOemSecureBootCn(const std::string& cn) {
-    // Fabricantes que legitimamente aparecem no db de fabrica (fallback quando a
-    // placa nao expoe dbDefault). Tokens de substring — manter especificos o
-    // suficiente para nao casar com nomes de cert arbitrarios.
+
+
+
     static const char* kOemTokens[] = {
         "MICROSOFT", "CANONICAL", "ASUSTEK", "GIGABYTE", "MICRO-STAR", "ASROCK",
         "DELL", "HEWLETT-PACKARD", "HP INC", "LENOVO", "ACER",
@@ -1218,14 +1204,14 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
     auto kekBuf  = ReadUefiVariable(L"KEK",        kEfiGlobalGuid,   kekOk);
     auto dbBuf   = ReadUefiVariable(L"db",         kEfiImageSecGuid, dbOk);
     auto dbxBuf  = ReadUefiVariable(L"dbx",        kEfiImageSecGuid, dbxOk);
-    // Nota (UEFI spec, Globally Defined Variables): TODAS as *Default vivem sob
-    // EFI_GLOBAL_VARIABLE — inclusive dbDefault/dbxDefault, ao contrario de db/dbx.
+
+
     auto pkDef   = ReadUefiVariable(L"PKDefault",  kEfiGlobalGuid, pkDefOk);
     auto kekDef  = ReadUefiVariable(L"KEKDefault", kEfiGlobalGuid, kekDefOk);
     auto dbDef   = ReadUefiVariable(L"dbDefault",  kEfiGlobalGuid, dbDefOk);
     auto dbxDef  = ReadUefiVariable(L"dbxDefault", kEfiGlobalGuid, dbxDefOk);
 
-    // BIOS legada ou NVRAM inacessivel (sem privilegio): nenhum store legivel — sem base
+
     if (!pkOk && !kekOk && !dbOk && !dbxOk)
         return;
 
@@ -1264,7 +1250,7 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         return s.empty() ? std::string("(vazio)") : s;
     };
 
-    // Entradas de `cur` ausentes de `def` (por hash SHA-256 do payload)
+
     auto entriesNotIn = [](const std::vector<EfiSigEntry>& cur,
                            const std::vector<EfiSigEntry>& def,
                            bool skipMicrosoft) {
@@ -1288,8 +1274,8 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
     auto dbDefEnt  = ParseEfiSignatureLists(dbDef);
     auto dbxDefEnt = ParseEfiSignatureLists(dbxDef);
 
-    // ── PK de teste (PKfail): chave "DO NOT TRUST/SHIP" de firmware de referencia AMI
-    //    deixada em producao — a chave privada vazou e assina qualquer coisa
+
+
     for (const auto& e : pkCur) {
         std::string up = ToUpperAscii(e.cn);
         if (up.find("DO NOT TRUST") != std::string::npos ||
@@ -1302,7 +1288,7 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── PK vs PKDefault: a Platform Key de fabrica da placa-mae
+
     if (pkOk && pkDefOk && !pkDefEnt.empty() && !pkCur.empty()) {
         auto extra   = entriesNotIn(pkCur, pkDefEnt, false);
         auto missing = entriesNotIn(pkDefEnt, pkCur, false);
@@ -1315,9 +1301,9 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── KEK vs KEKDefault
+
     if (kekOk && kekDefOk && !kekDefEnt.empty()) {
-        auto extra = entriesNotIn(kekCur, kekDefEnt, /*skipMicrosoft=*/true);
+        auto extra = entriesNotIn(kekCur, kekDefEnt, true);
         if (!extra.empty()) {
             emit("HIGH", "SecureBoot::KEK",
                  "KEK contains keys absent from motherboard factory default",
@@ -1328,9 +1314,9 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── db vs dbDefault: cert extra no db assina EFI que passa no Secure Boot
+
     if (dbOk && dbDefOk && !dbDefEnt.empty()) {
-        auto extra = entriesNotIn(dbCur, dbDefEnt, /*skipMicrosoft=*/true);
+        auto extra = entriesNotIn(dbCur, dbDefEnt, true);
         if (!extra.empty()) {
             emit("HIGH", "SecureBoot::db",
                  "Secure Boot db contains certs absent from motherboard factory default",
@@ -1339,8 +1325,8 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
                  "BOOT.SECURE_BOOT.DB_CUSTOM_CERT", "HIGH", "SUSPICIOUS", true);
         }
     } else if (dbOk && !dbDefOk) {
-        // Fallback: placa nao expoe dbDefault — sem diff possivel, checa apenas CNs
-        // desconhecidos (OEMs incluem certs extras de fabrica, dai confianca baixa)
+
+
         std::vector<EfiSigEntry> unknown;
         for (const auto& e : dbCur) {
             if (!e.isX509) continue;
@@ -1357,8 +1343,8 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── dbx vs dbxDefault: rollback da lista de revogacao reabilita loaders
-    //    vulneraveis ja revogados (tecnica BlackLotus)
+
+
     if (dbxDefOk && !dbxDefEnt.empty()) {
         auto missing = dbxOk ? entriesNotIn(dbxDefEnt, dbxCur, false) : dbxDefEnt;
         if (!missing.empty()) {
@@ -1373,7 +1359,7 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── SetupMode/AuditMode: chaves podem ser trocadas sem autenticacao
+
     {
         uint8_t setupMode = 0, auditMode = 0;
         bool smOk = false, amOk = false;
@@ -1392,7 +1378,7 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
         }
     }
 
-    // ── PK ausente com Secure Boot supostamente ativo: estado inconsistente
+
     if (secureBoot && (!pkOk || pkCur.empty())) {
         emit("MEDIUM", "SecureBoot::PK",
              "Secure Boot reported active but no Platform Key enrolled",
@@ -1404,7 +1390,7 @@ static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>
 
 struct MsEfiExpectedPath {
     const wchar_t* nameUpper;
-    const wchar_t* expectedFragment; // nullptr = file should never appear on the ESP
+    const wchar_t* expectedFragment;
 };
 
 static const MsEfiExpectedPath kMsEfiExpectedPaths[] = {
@@ -1432,12 +1418,7 @@ static bool IsMasqueradingMsEfi(const std::wstring& fileName, const std::wstring
     return false;
 }
 
-// Reads the stored SHA-256 of filePath from HKCU\SOFTWARE\rxvscan\EfiBaseline.
-// If the stored hash differs from currentHash, returns the previous hash (change detected).
-// On first run or when unchanged, stores/updates the hash and returns empty string.
-// Force-writes newHash as the accepted baseline. Called when a critical boot file has changed
-// but is still validly MS-signed (Windows Update scenario) — prevents the stale registry entry
-// from triggering HIGH findings on every subsequent scan.
+
 static void AcceptEfiNewHash(const std::wstring& filePath, const std::string& newHash) {
     std::string key = WideToUtf8(filePath);
     for (char& c : key) if (c == '\\') c = '/';
@@ -1451,8 +1432,7 @@ static void AcceptEfiNewHash(const std::wstring& filePath, const std::string& ne
     }
 }
 
-// MBR sector SHA-256 baseline helpers. Registry key: HKCU\SOFTWARE\rxvscan\MbrBaseline.
-// Value name: "PhysicalDrive0", "PhysicalDrive1", etc.
+
 static std::string CheckMbrHashBaseline(int driveIndex, const std::string& currentHash) {
     std::string key = "PhysicalDrive" + std::to_string(driveIndex);
     HKEY hKey = nullptr;
@@ -1516,10 +1496,7 @@ static std::string CheckEfiHashBaseline(const std::wstring& filePath, const std:
     return (storedHash.empty() || storedHash == currentHash) ? "" : storedHash;
 }
 
-// Reads the first 512 bytes (Sector 0) from each physical drive and checks:
-//   1. Boot signature at bytes [510-511] must be 0x55 0xAA.
-//   2. On UEFI systems, partition entry type at offset 0x1BE+4 must be 0xEE (GPT Protective).
-//   3. SHA-256 baseline stored in HKCU\SOFTWARE\rxvscan\MbrBaseline — flags on change.
+
 static void CollectMbrIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>& findings) {
     FIRMWARE_TYPE fwType = FirmwareTypeUnknown;
     GetFirmwareType(&fwType);
@@ -1531,7 +1508,7 @@ static void CollectMbrIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>&
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, 0, nullptr);
         if (hDrive == INVALID_HANDLE_VALUE)
-            break; // drives are numbered contiguously; first failure means no more drives
+            break;
 
         uint8_t sector[512] = {};
         DWORD bytesRead = 0;
@@ -1544,7 +1521,7 @@ static void CollectMbrIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>&
 
         std::string driveName = "\\\\.\\PhysicalDrive" + std::to_string(i) + " [MBR]";
 
-        // Check 1: boot signature
+
         if (sector[510] != 0x55 || sector[511] != 0xAA) {
             ScannerUI::EfiCheatFinding f;
             f.severity  = "HIGH";
@@ -1556,9 +1533,9 @@ static void CollectMbrIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>&
             findings.push_back(f);
         }
 
-        // Check 2: on UEFI systems the protective MBR must have partition type 0xEE
+
         if (isUefi) {
-            // Partition table starts at 0x1BE; type byte is at offset +4 within the entry
+
             uint8_t partType = sector[0x1BE + 4];
             if (partType != 0xEE) {
                 ScannerUI::EfiCheatFinding f;
@@ -1573,7 +1550,7 @@ static void CollectMbrIntegrityFindings(std::vector<ScannerUI::EfiCheatFinding>&
             }
         }
 
-        // Check 3: SHA-256 baseline change detection
+
         std::string currentHash = DetectionFilter::ComputeBufferSha256(sector, 512);
         if (!currentHash.empty()) {
             std::string prevHash = CheckMbrHashBaseline(i, currentHash);
@@ -1649,51 +1626,51 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
 
         bool badSections  = peInfo.badSections && !signedOk;
 
-        // Detect binary patching: compare stored PE checksum against computed value.
-        // Extended to all EFI files regardless of path — not just standard paths.
+
+
         bool checksumMismatch = peInfo.valid &&
                                 DetectionFilter::CheckPeChecksumMismatch(candidate.path, peInfo.storedChecksum);
 
-        // Content-integrity checks for critical Windows EFI boot files.
-        // These catch in-place binary modification even when the Authenticode signature
-        // wrapper is still present (signer's wrapper untouched, payload bytes patched).
+
+
+
         static const std::unordered_set<std::wstring> kCriticalBootNames = {
             L"BOOTMGFW.EFI", L"WINLOAD.EFI", L"BOOTX64.EFI", L"BOOTMGR.EFI"
         };
-        // Known Microsoft EFI certificate SHA-1 thumbprints (lowercase hex).
+
         static const std::unordered_set<std::string> kMsEfiThumbprints = {
-            "580a6f4cc4e4b669b9ebdc1b2b3e087b80d0678d", // Microsoft Windows Production PCA 2011
-            "13adb9056804f03cc1aa0779eb1d43ebe52a6a3d", // Microsoft Corporation UEFI CA 2011
-            "b3772e76f1d8c4e8d62d3af5e6e91ffed5c2f8fb", // Microsoft UEFI CA 2023
-            "46def63b5ce1890208cfabff48de43f0e7b74c5b", // Microsoft Windows PCA 2010
+            "580a6f4cc4e4b669b9ebdc1b2b3e087b80d0678d",
+            "13adb9056804f03cc1aa0779eb1d43ebe52a6a3d",
+            "b3772e76f1d8c4e8d62d3af5e6e91ffed5c2f8fb",
+            "46def63b5ce1890208cfabff48de43f0e7b74c5b",
         };
 
-        // pinMsThumbprint: only the 4 Microsoft critical boot names — these MUST chain
-        // to one of the pinned MS EFI certs. criticalWindowsEfi keeps the old meaning
-        // (severity gates and the "critical" classification for findings).
+
+
+
         const std::wstring fileNameUpper = ToUpperInvariant(fileName);
         const std::wstring candidatePathUpper = ToUpperInvariant(candidate.path);
         bool criticalWindowsEfi = kCriticalBootNames.count(fileNameUpper) > 0;
-        // The fallback \EFI\BOOT\BOOTX64.EFI may legitimately be shim/grub from
-        // Canonical, Red Hat or another trusted UEFI vendor. Microsoft pinning is
-        // only valid for Microsoft's own boot directory and manager filenames.
+
+
+
         bool pinMsThumbprint =
             candidatePathUpper.find(L"\\EFI\\MICROSOFT\\") != std::wstring::npos ||
             fileNameUpper == L"BOOTMGFW.EFI" ||
             fileNameUpper == L"BOOTMGR.EFI";
-        // enforceHashBaseline: any .EFI sitting under an \EFI\ directory (ESP, mounted
-        // ESP, shadow ESP). Catches in-place modification of vendor/shim/grub/memtest
-        // files — they have no MS thumbprint to pin but should still be byte-stable
-        // between scans. First scan records the baseline silently; later scans flag
-        // any change once and refresh the baseline so legit vendor updates do not loop.
+
+
+
+
+
         bool enforceHashBaseline = ToUpperInvariant(candidate.path).find(L"\\EFI\\")
                                    != std::wstring::npos;
-        // For signed non-critical files the Authenticode signature is the authoritative integrity
-        // check — some vendor signing toolchains never update the PE CheckSum field, so mismatch
-        // alone on a properly-signed file is a toolchain artifact, not evidence of patching.
-        // The PE CheckSum field is not an Authenticode integrity primitive. Some
-        // legitimate EFI toolchains leave it stale, so it is only actionable when
-        // the file also fails trust verification.
+
+
+
+
+
+
         bool checksumMismatchSevere = checksumMismatch && !signedOk;
         bool catalogMismatch    = false;
         bool hashChanged        = false;
@@ -1707,10 +1684,10 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
                 efiThumb = DetectionFilter::GetSignerCertThumbprint(candidate.path);
                 pinnedMsThumb = !efiThumb.empty() && kMsEfiThumbprints.count(efiThumb) > 0;
                 thumbprintMismatch = !efiThumb.empty() && !pinnedMsThumb;
-                // Fallback: if leaf cert not in the hardcoded list but the full chain is
-                // trust-verified (signedOk=true) and the signer CN starts with "MICROSOFT",
-                // accept as legitimate. WinVerifyTrust chain validation prevents CN spoofing,
-                // and prefix match (vs. substring) blocks contrived names like "Microsofty".
+
+
+
+
                 if (thumbprintMismatch) {
                     auto id = DetectionFilter::GetVerifiedSignerIdentityCached(candidate.path);
                     if (id.trusted && id.cnUpper.compare(0, 9, L"MICROSOFT") == 0) {
@@ -1722,13 +1699,13 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
         }
 
         if (enforceHashBaseline) {
-            // Catalog check is tri-state. Only assert a mismatch when the catalog
-            // subsystem actually worked AND reported the hash absent. "Unverifiable"
-            // (service/hash failure) must NOT flag a legitimate file. A file that is
-            // genuinely embedded-signed by a pinned Microsoft EFI cert is authentic
-            // even when absent from .cat catalogs, so it is never a catalog mismatch.
-            // QueryWindowsCatalogState itself was hardened to require an MS-signed .cat
-            // for a Found verdict, closing the CatRoot poisoning gap.
+
+
+
+
+
+
+
             DetectionFilter::CatalogState catState =
                 DetectionFilter::QueryWindowsCatalogState(candidate.path);
             catalogMismatch = (catState == DetectionFilter::CatalogState::NotFound) &&
@@ -1745,11 +1722,11 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             }
             hashChanged = baselineResult == ProtectedBaselineResult::Changed;
 
-            // Windows Update path: pinned MS-signed file rotates — silently accept.
-            // Vendor EFI path (signed non-MS or unsigned): keep the finding so the user
-            // is alerted, but refresh the baseline so routine updates do not loop the
-            // alert. An attacker who replaces shim.efi/grub.efi/etc. produces exactly
-            // one finding; failing to investigate is the user's responsibility.
+
+
+
+
+
             if (baselineResult == ProtectedBaselineResult::StoreTampered) {
                 ScannerUI::EfiCheatFinding baselineFinding;
                 baselineFinding.severity = "MEDIUM";
@@ -1765,11 +1742,11 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             }
         }
 
-        // Cross-location integrity: compare this file's hash against the reference
-        // copy Windows itself keeps in C:\Windows\Boot\EFI (staged there by bcdboot
-        // before being written to the ESP). Unlike the baseline check above (which
-        // only notices a change between two scans), this catches tampering that was
-        // already present the very first time the tool ever runs on the machine.
+
+
+
+
+
         bool bootRefMismatch = false;
         std::wstring bootRefPath;
         std::string bootRefHash, bootEspHash;
@@ -1795,9 +1772,9 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
         bool hasEmbeddedCheatStr = !suspiciousStr.empty();
 
 
-        // ── Bootloader hook detection ────────────────────────────────────────
-        // Checked before allClear so patched-but-still-Authenticode-signed files are caught.
-        // Pushed without 'continue' — multiple distinct hook findings per file are possible.
+
+
+
         if (peInfo.epHooked && !signedOk) {
             ScannerUI::EfiCheatFinding f;
             FileTimeToLocalStrings(candidate.data.ftLastWriteTime, f.date, f.time);
@@ -1813,11 +1790,11 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             f.suspicious = true;
             findings.push_back(f);
         }
-        // The executable-section-name whitelist is intentionally small, so legitimate
-        // signed EFI binaries (memtest.efi, vendor EFI tools, EDK2 builds) routinely
-        // contain section names outside it (.itext/.crt/_TEXT/etc). Gate by !signedOk:
-        // an Authenticode-trusted chain authenticates the section layout, and any real
-        // injection on a signed binary would have broken the signature already.
+
+
+
+
+
         if (peInfo.injectedSection && !signedOk) {
             ScannerUI::EfiCheatFinding f;
             FileTimeToLocalStrings(candidate.data.ftLastWriteTime, f.date, f.time);
@@ -1828,10 +1805,10 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             f.suspicious = true;
             findings.push_back(f);
         }
-        // Removed: Rich-header-absent finding on signed Microsoft EFI.
-        // Microsoft strips Rich headers from many production-signed EFI binaries
-        // (including bootmgfw.efi on recent Windows builds), so absence is not a
-        // reliable patcher indicator — it produced FPs on legit boot files.
+
+
+
+
         if (peInfo.dataDirOutOfBounds) {
             ScannerUI::EfiCheatFinding f;
             FileTimeToLocalStrings(candidate.data.ftLastWriteTime, f.date, f.time);
@@ -1843,13 +1820,13 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             findings.push_back(f);
         }
 
-        // Bug 2 fix: remover "|| standardPath" — arquivos EFI em caminhos padrao
-        // NUNCA sao modificados durante a sessao ativa de forma legitima. O Windows Update
-        // modifica bootmgfw.efi antes do reboot, entao apos o boot modifiedAfterBoot=false.
-        // modifiedAfterBoot=true em caminho padrao = bootkit modificou o arquivo em runtime.
-        // hookAnomaly: structural signs of binary patching that survive Authenticode
-        // wrapping. injectedSection contributes only when !signedOk (see comment above);
-        // noRichHeader was removed because Microsoft ships legit EFI binaries without it.
+
+
+
+
+
+
+
         bool hookAnomaly = (peInfo.epHooked && !signedOk) || peInfo.dataDirOutOfBounds ||
                            (peInfo.injectedSection && !signedOk);
         bool allClear = signedOk && !badSections && !badSubsystem && !checksumMismatchSevere &&
@@ -1960,10 +1937,10 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
         } else if (riskyName) {
             reason = "cheat-like EFI filename";
         } else {
-            // Reached here with signedOk=true, !modifiedAfterBoot, !riskyName, but allClear
-            // turned out false from some structural check that has already pushed its own
-            // dedicated finding (epHooked, dataDirOutOfBounds, etc). Emitting another
-            // generic "EFI requires review" on top is duplicate noise — skip.
+
+
+
+
             continue;
         }
 
@@ -2087,13 +2064,11 @@ static void CollectPrefetchFilesOnDisk(std::unordered_map<std::wstring, Prefetch
     FindClose(find);
 }
 
-// Reads the USN change journal (FSCTL_READ_USN_JOURNAL) looking for .pf files that were
-// CREATED (execution happened) but are no longer on disk (deleted = anti-forensic wipe).
-// Returns the set of deleted .pf names with their timestamps and the create→delete delta.
+
 struct DeletedPrefetchRecord {
     std::wstring name;
     FILETIME     deleteTime = {};
-    FILETIME     createTime = {};   // zero if create record not visible in journal
+    FILETIME     createTime = {};
 };
 
 static std::vector<DeletedPrefetchRecord>
@@ -2118,7 +2093,7 @@ CollectDeletedPrefetchFromChangeJournal(DWORD& outDeleteCount)
         return result;
     }
 
-    // Approximate boot time: current time minus uptime
+
     FILETIME bootTime = {};
     {
         ULONGLONG uptimeMs = GetTickCount64();
@@ -2130,7 +2105,7 @@ CollectDeletedPrefetchFromChangeJournal(DWORD& outDeleteCount)
         bootTime.dwHighDateTime = (DWORD)(bootU >> 32);
     }
 
-    // First pass: collect CREATE and DELETE records for .pf files since boot
+
     std::unordered_map<std::wstring, FILETIME> createTimes;
     std::unordered_map<std::wstring, FILETIME> deleteTimes;
 
@@ -2161,7 +2136,7 @@ CollectDeletedPrefetchFromChangeJournal(DWORD& outDeleteCount)
                 ft.dwLowDateTime  = rec->TimeStamp.LowPart;
                 ft.dwHighDateTime = rec->TimeStamp.HighPart;
 
-                // Only consider events that happened since boot
+
                 if (FileTimeToU64(ft) >= FileTimeToU64(bootTime)) {
                     const wchar_t* namePtr =
                         reinterpret_cast<const wchar_t*>(cursor + rec->FileNameOffset);
@@ -2175,7 +2150,7 @@ CollectDeletedPrefetchFromChangeJournal(DWORD& outDeleteCount)
                             ++outDeleteCount;
                         }
                         if (reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME)) {
-                            // Only store if not already recorded (keep earliest)
+
                             if (createTimes.find(key) == createTimes.end())
                                 createTimes[key] = ft;
                         }
@@ -2191,21 +2166,21 @@ CollectDeletedPrefetchFromChangeJournal(DWORD& outDeleteCount)
     }
     CloseHandle(volume);
 
-    // Build Prefetch directory path for on-disk check
+
     wchar_t winDir[MAX_PATH] = {};
     GetWindowsDirectoryW(winDir, MAX_PATH);
     std::wstring prefDir = std::wstring(winDir) + L"\\Prefetch\\";
 
-    // Cross-reference: deleted .pf that no longer exist on disk = anti-forensic wipe
+
     for (const auto& kv : deleteTimes) {
         const std::wstring& key = kv.first;
-        // Find the original-case name (from deleteTimes key, which is uppercase)
-        // We use the key directly for disk check since it's uppercase and Windows is case-insensitive
+
+
         if (FileExistsW(prefDir + key))
-            continue;  // Still on disk — file was renamed or temporarily deleted, skip
+            continue;
 
         DeletedPrefetchRecord rec;
-        // Recover original-case name from createTimes if available
+
         auto cit = createTimes.find(key);
         rec.name       = (cit != createTimes.end()) ? key : key;
         rec.deleteTime = kv.second;
@@ -2226,7 +2201,7 @@ std::vector<ScannerUI::PrefetchHit> CollectHiddenPrefetchDetections() {
     };
 
     std::vector<HiddenPrefetch> hidden;
-    constexpr ULONGLONG kWiperThresholdSec = 120ULL;  // < 2 min create→delete = active wiper
+    constexpr ULONGLONG kWiperThresholdSec = 120ULL;
     constexpr ULONGLONG kSecToInterval     = 10000000ULL;
 
     for (const auto& rec : deleted) {
@@ -2267,17 +2242,14 @@ std::vector<ScannerUI::PrefetchHit> CollectHiddenPrefetchDetections() {
     return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// USN Journal integrity: detects anti-forensic manipulation of the journal
-// itself (size reduction, wipe+recreate, entry gaps, abnormal configuration).
-// ─────────────────────────────────────────────────────────────────────────────
+
 
 std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
     std::string& outStatus, std::string& outDrive)
 {
     std::vector<ScannerUI::PrefetchHit> findings;
 
-    // Open the system volume — same pattern as CollectDeletedPrefetchFromChangeJournal
+
     std::wstring root = GetWindowsDriveRoot();
     if (root.empty()) {
         outStatus = "NTFS: erro ao abrir volume";
@@ -2294,7 +2266,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
         return findings;
     }
 
-    // Query journal metadata
+
     USN_JOURNAL_DATA_V0 jd = {};
     DWORD bytes = 0;
     if (!DeviceIoControl(hVol, FSCTL_QUERY_USN_JOURNAL,
@@ -2324,7 +2296,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
         findings.push_back(h);
     };
 
-    // ── Detecção 1: MaximumSize reduzido ─────────────────────────────────────
+
     constexpr DWORDLONG k8MB  =  8ULL * 1024 * 1024;
     constexpr DWORDLONG k32MB = 32ULL * 1024 * 1024;
     if (jd.MaximumSize < k8MB) {
@@ -2341,7 +2313,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
                    std::string(buf) + " — historico forense abaixo do padrao", "MEDIUM");
     }
 
-    // ── Detecção 2: AllocationDelta anormal ──────────────────────────────────
+
     constexpr DWORDLONG k512KB = 512ULL * 1024;
     if (jd.AllocationDelta > 0 && jd.AllocationDelta < k512KB) {
         char buf[64];
@@ -2351,7 +2323,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
                    std::string(buf) + " — pode retardar o crescimento do journal", "MEDIUM");
     }
 
-    // ── Detecção 3: NextUsn quase zero (journal recreado muito recentemente) ─
+
     if (jd.NextUsn < 65536 && uptimeMin > 10) {
         char buf[64];
         snprintf(buf, sizeof(buf), "NextUsn=%llu (uptime=%u min)",
@@ -2360,7 +2332,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
                    std::string(buf) + " — journal com sequencia quase zero: recreado recentemente", "HIGH");
     }
 
-    // ── Detecção 4: Janela legivel muito pequena (wipe recente) ──────────────
+
     if (jd.MaximumSize > 0 && jd.NextUsn > jd.LowestValidUsn) {
         DWORDLONG readable = jd.NextUsn - jd.LowestValidUsn;
         int pct = (int)((readable * 100ULL) / jd.MaximumSize);
@@ -2381,7 +2353,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
         }
     }
 
-    // ── Detecção 4b: Journal recriado desde o boot (primeiro entry > boot) ───
+
     if (jd.LowestValidUsn < jd.NextUsn) {
         READ_USN_JOURNAL_DATA_V0 readFirst = {};
         readFirst.StartUsn     = jd.LowestValidUsn;
@@ -2403,12 +2375,12 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
                     firstEntryFt.dwLowDateTime  = rec->TimeStamp.LowPart;
                     firstEntryFt.dwHighDateTime = rec->TimeStamp.HighPart;
 
-                    // Compare to boot time
+
                     FILETIME bootTime = GetBootFileTime();
                     ULONGLONG firstU = FileTimeToU64(firstEntryFt);
                     ULONGLONG bootU  = FileTimeToU64(bootTime);
 
-                    // Format first entry timestamp for UI display
+
                     std::string feDate, feTime;
                     FileTimeToLocalStrings(firstEntryFt, feDate, feTime);
                     outDrive = WideToUtf8(root) + " [NTFS] - Ativo | First Entry: " + feDate + " " + feTime;
@@ -2427,9 +2399,9 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
         }
     }
 
-    // ── Detecção 5: Gaps de sequência USN (entradas deletadas do $J) ─────────
+
     if (jd.NextUsn > jd.LowestValidUsn) {
-        constexpr DWORDLONG kSampleWindow = 512ULL * 1024; // últimos 512KB
+        constexpr DWORDLONG kSampleWindow = 512ULL * 1024;
         READ_USN_JOURNAL_DATA_V0 readGap = {};
         readGap.StartUsn = (static_cast<DWORDLONG>(jd.NextUsn) >
                             static_cast<DWORDLONG>(jd.LowestValidUsn) + kSampleWindow)
@@ -2457,7 +2429,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
                 if (rec->MajorVersion == 2) {
                     if (!firstRecord && rec->Usn > expectedUsn) {
                         DWORDLONG gap = (DWORDLONG)(rec->Usn - expectedUsn);
-                        // Gaps < 8 bytes are alignment padding (normal)
+
                         if (gap > 8) totalGap += gap;
                     }
                     firstRecord = false;
@@ -2470,7 +2442,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
             readGap.StartUsn = nextUsn;
         }
 
-        constexpr DWORDLONG kGapThreshold = 64ULL * 1024; // 64KB de entradas ausentes
+        constexpr DWORDLONG kGapThreshold = 64ULL * 1024;
         if (totalGap > kGapThreshold) {
             char buf[128];
             snprintf(buf, sizeof(buf),
@@ -2483,7 +2455,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
 
     CloseHandle(hVol);
 
-    // Build status and drive strings if not set yet (first entry detection above sets outDrive)
+
     bool hasHigh = false;
     for (const auto& f : findings)
         if (f.severity == "HIGH") { hasHigh = true; break; }
@@ -2503,10 +2475,7 @@ std::vector<ScannerUI::PrefetchHit> CollectUsnJournalIntegrityFindings(
     return findings;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Prefetch subsystem integrity checks: detect registry disabling, directory
-// tampering (reparse point), mass deletion, and active wipers.
-// ─────────────────────────────────────────────────────────────────────────────
+
 
 std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
     std::vector<ScannerUI::PrefetchHit> out;
@@ -2525,8 +2494,8 @@ std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
         out.push_back(std::move(h));
     };
 
-    // Check 1 — EnablePrefetcher registry value
-    // 0=off, 1=boot only, 2=app only, 3=both (normal Windows default)
+
+
     {
         DWORD val = 3;
         HKEY hKey = nullptr;
@@ -2549,7 +2518,7 @@ std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
                    "Apenas boot Prefetch ativo — execucoes de apps nao sao registradas");
     }
 
-    // Check 2 — Prefetch directory reparse point (junction / symlink)
+
     {
         wchar_t winDir[MAX_PATH] = {};
         GetWindowsDirectoryW(winDir, MAX_PATH);
@@ -2561,7 +2530,7 @@ std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
                    "C:\\Windows\\Prefetch redirecionado — possivelmente ocultando execucoes");
     }
 
-    // Check 3 — Mass .pf deletion detected via change journal (reuse deleteCount)
+
     {
         DWORD deleteCount = 0;
         CollectDeletedPrefetchFromChangeJournal(deleteCount);
@@ -2571,7 +2540,7 @@ std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
                    "Alto volume de delecoes de .pf desde o boot — possivel wiper");
     }
 
-    // Check 4 — SysMain (Superfetch) service stopped or disabled
+
     {
         SC_HANDLE sc = OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT);
         if (sc) {
@@ -2612,10 +2581,7 @@ std::vector<ScannerUI::PrefetchHit> CollectPrefetchIntegrityFindings() {
     return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P5 — Timeline correlation: cross-reference BAM × Prefetch × USN journal
-// Detects anti-forensics artifacts that only appear when sources are compared.
-// ─────────────────────────────────────────────────────────────────────────────
+
 
 std::vector<ScannerUI::TimelineCorrelationFinding>
 CollectTimelineCorrelationFindings(
@@ -2631,8 +2597,8 @@ CollectTimelineCorrelationFindings(
     std::string date, timeStr;
     FileTimeToLocalStrings(now, date, timeStr);
 
-    // Build a set of paths that appear in USN (prefetch cross-reference)
-    // PrefetchHit entries with "Registro USN sem Prefetch atual" = has USN
+
+
     std::unordered_set<std::wstring> usnKnownPaths;
     for (const auto& ph : prefetch) {
         if (ph.alias.find("USN") != std::string::npos || ph.note.find("USN") != std::string::npos) {
@@ -2641,7 +2607,7 @@ CollectTimelineCorrelationFindings(
         }
     }
 
-    // Build a set of prefetch-on-disk basenames (no-USN entries)
+
     std::unordered_set<std::wstring> prefetchOnDiskNoUsn;
     for (const auto& ph : prefetch) {
         if (ph.alias == "Prefetch ausente no USN Journal") {
@@ -2650,15 +2616,15 @@ CollectTimelineCorrelationFindings(
         }
     }
 
-    // Collect Sysmon EventID 1102 (log cleared) timestamps for correlation
-    // Store as YYYYMMDDHHMMSS strings for proximity comparison
+
+
     std::vector<std::string> logClearedTimes;
     for (const auto& ev : sysmonEvents) {
         if (ev.eventId == 1102 || ev.eventId == 104)
             logClearedTimes.push_back(ev.date + ev.time);
     }
 
-    // Rule — BATCH_TIMESTAMP_WIPE: 3+ BAM entries with "00:00:00" timestamp
+
     {
         int wipedCount = 0;
         for (const auto& entry : bam) {
@@ -2678,14 +2644,14 @@ CollectTimelineCorrelationFindings(
         }
     }
 
-    // Rule 1 + TRIPLE_WIPE: BAM entry + no USN + optionally no prefetch
+
     for (const auto& entry : bam) {
         if (entry.reason != "DELETED" && entry.reason != "UNSIGNED")
             continue;
         std::wstring wpath(entry.path.begin(), entry.path.end());
         std::wstring wpathUp = ToUpperInvariant(wpath);
 
-        // Wiped timestamp: time part is exactly "00:00:00"
+
         if (entry.time == "00:00:00") {
             ScannerUI::TimelineCorrelationFinding f;
             f.date      = entry.date;
@@ -2703,9 +2669,9 @@ CollectTimelineCorrelationFindings(
         if (!noUsn)
             continue;
 
-        // Check if a matching prefetch-no-USN entry also exists for this exe name
+
         std::wstring baseNameUp = ToUpperInvariant(DetectionFilter::BaseName(wpath));
-        // Prefetch filename format: EXECNAME-XXXXXXXX.pf
+
         bool tripleWipe = false;
         for (const auto& pfKey : prefetchOnDiskNoUsn) {
             if (pfKey.rfind(baseNameUp, 0) == 0) {
@@ -2734,12 +2700,12 @@ CollectTimelineCorrelationFindings(
             f.detail    = "file executed post-boot (BAM) but has no USN journal record and no longer exists — execution tracks wiped";
             f.suspicious = true;
 
-            // Check if a log-clear event happened within 1 hour of this BAM entry
+
             if (!logClearedTimes.empty()) {
                 std::string bamDt = entry.date + entry.time;
                 for (const auto& clearDt : logClearedTimes) {
-                    // Simple lexicographic proximity check on YYYY-MM-DDHH:MM:SS
-                    // An exact string match of date is sufficient to flag same-day correlation
+
+
                     if (!clearDt.empty() && clearDt.substr(0, 10) == bamDt.substr(0, 10)) {
                         f.detail += " | LOG_CLEARED_NEAR_EXECUTION (EventID 1102/104 same day)";
                         break;
@@ -2751,8 +2717,8 @@ CollectTimelineCorrelationFindings(
         }
     }
 
-    // Rule 2: Prefetch entries referencing DLLs that no longer exist at path
-    // PrefetchHit with "Prefetch ausente no USN Journal" = disk file exists but no USN
+
+
     for (const auto& ph : prefetch) {
         if (ph.alias != "Prefetch ausente no USN Journal")
             continue;

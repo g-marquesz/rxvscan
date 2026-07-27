@@ -2,12 +2,11 @@
 #include <setupapi.h>
 #pragma comment(lib, "setupapi.lib")
 
-// {4D36E968-E325-11CE-BFC1-08002BE10318} — display device class
 static const GUID kDisplayClass = {
     0x4D36E968, 0xE325, 0x11CE,
     { 0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18 }
 };
-// {CA3E0642-10D2-4652-9D61-A8BD3A652041} — camera device class
+
 static const GUID kCameraClass = {
     0xCA3E0642, 0x10D2, 0x4652,
     { 0x9D, 0x61, 0xA8, 0xBD, 0x3A, 0x65, 0x20, 0x41 }
@@ -28,10 +27,6 @@ static void AddStreamModFinding(std::vector<ScannerUI::StreamModFinding>& out,
     f.severity = severity;
     out.push_back(std::move(f));
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// P1 — SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)
-// ─────────────────────────────────────────────────────────────────────────────
 
 static const DWORD kWdaExclude = 0x00000011;
 
@@ -93,10 +88,6 @@ static void ScanCaptureExcludedWindows(std::vector<ScannerUI::StreamModFinding>&
     EnumWindows(CaptureExcludeProc, reinterpret_cast<LPARAM>(&ctx));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P2 — OBS / Streamlabs plugin integrity (disk) + M2 entropy + M1 runtime injection
-// ─────────────────────────────────────────────────────────────────────────────
-
 static bool HasSuspiciousPluginKeyword(const std::wstring& name) {
     std::wstring up = name;
     for (auto& c : up) c = towupper(c);
@@ -126,7 +117,6 @@ static std::vector<std::wstring> GetObsPluginDirs() {
     return dirs;
 }
 
-// M2: Shannon entropy for a file — uses FileEntropySample from detection_filters.h
 static std::string EntropyStr(double e) {
     char buf[16]; snprintf(buf, sizeof(buf), "%.2f", e);
     return buf;
@@ -143,7 +133,7 @@ static void ScanStreamingPlugins(std::vector<ScannerUI::StreamModFinding>& out) 
             bool signed_    = IsAuthenticodeSigned(pluginPath);
 
             if (!signed_ || suspicious) {
-                // M2: calculate entropy to distinguish packed/obfuscated plugins
+
                 double entropy = DetectionFilter::FileEntropySample(pluginPath, 65536);
                 bool packed    = entropy >= DetectionFilter::kPackedEntropy;
 
@@ -164,7 +154,6 @@ static void ScanStreamingPlugins(std::vector<ScannerUI::StreamModFinding>& out) 
     }
 }
 
-// M1: Scan loaded modules inside running OBS/Streamlabs process
 static bool IsObsProcess(const std::wstring& nameUp) {
     static const wchar_t* kObs[] = {
         L"OBS64.EXE", L"OBS32.EXE", L"OBS.EXE",
@@ -192,13 +181,13 @@ static void ScanObsRuntimeModules(std::vector<ScannerUI::StreamModFinding>& out)
         HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
         if (!hProc) continue;
 
-        // Get OBS install directory to whitelist its own modules
+
         std::wstring obsPath  = ProcessFullPathW(pe.th32ProcessID);
         std::wstring obsDir   = obsPath;
         size_t slash = obsDir.find_last_of(L"\\/");
         if (slash != std::wstring::npos)
             obsDir = obsDir.substr(0, slash);
-        // parent directory (e.g. obs-studio\bin\64bit → obs-studio)
+
         slash = obsDir.find_last_of(L"\\/");
         std::wstring obsRoot = (slash != std::wstring::npos) ? obsDir.substr(0, slash) : obsDir;
         slash = obsRoot.find_last_of(L"\\/");
@@ -215,11 +204,11 @@ static void ScanObsRuntimeModules(std::vector<ScannerUI::StreamModFinding>& out)
                 std::wstring modUp = mod.path;
                 for (auto& c : modUp) c = towupper(c);
 
-                // Allow system paths and OBS install path
+
                 if (modUp.find(L"\\WINDOWS\\") != std::wstring::npos) continue;
                 if (!obsRootUp.empty() && modUp.find(obsRootUp) != std::wstring::npos) continue;
 
-                // Check APPDATA obs-studio (user plugins)
+
                 wchar_t appdataBuf[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(L"APPDATA", appdataBuf, MAX_PATH)) {
                     std::wstring adUp = appdataBuf;
@@ -228,14 +217,14 @@ static void ScanObsRuntimeModules(std::vector<ScannerUI::StreamModFinding>& out)
                     if (modUp.find(adUp) != std::wstring::npos) continue;
                 }
 
-                // Remaining module is not from OBS or Windows — check signature
+
                 if (IsAuthenticodeSigned(mod.path)) continue;
 
-                // Unsigned modules commonly reaching this point are legitimate but
-                // unsigned/self-signed overlay-hook DLLs (Discord, RTSS, Steam) that
-                // inject into every D3D/OpenGL/Vulkan-rendering process system-wide,
-                // including OBS itself. Downgrade instead of suppressing: a name match
-                // is not a trust signal on its own, so it stays visible at MEDIUM.
+
+
+
+
+
                 std::wstring modName = BaseNameFromPath(mod.path);
                 auto modCls = DetectionFilter::ClassifyPath(mod.path);
                 bool trustedDir = DetectionFilter::IsTrustedDir(modCls);
@@ -268,10 +257,6 @@ static void ScanObsRuntimeModules(std::vector<ScannerUI::StreamModFinding>& out)
     CloseHandle(snap);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P3 — Virtual display adapter + M3 driver signature verification
-// ─────────────────────────────────────────────────────────────────────────────
-
 static bool IsKnownVirtualDisplay(const std::wstring& desc) {
     std::wstring up = desc;
     for (auto& c : up) c = towupper(c);
@@ -286,7 +271,6 @@ static bool IsKnownVirtualDisplay(const std::wstring& desc) {
     return false;
 }
 
-// M3: Resolve driver binary path from service name
 static std::wstring GetDriverBinaryPath(const std::wstring& serviceName) {
     std::wstring regKey = L"SYSTEM\\CurrentControlSet\\Services\\" + serviceName;
     HKEY hKey = nullptr;
@@ -304,7 +288,7 @@ static std::wstring GetDriverBinaryPath(const std::wstring& serviceName) {
     wchar_t expanded[MAX_PATH * 2] = {};
     ExpandEnvironmentStringsW(imagePath, expanded, MAX_PATH * 2);
 
-    // Strip \??\ prefix used in kernel driver paths
+
     std::wstring path = expanded;
     if (path.rfind(L"\\??\\", 0) == 0) path = path.substr(4);
     if (path.rfind(L"\\SystemRoot\\", 0) == 0) {
@@ -332,7 +316,7 @@ static void ScanVirtualDisplayAdapters(std::vector<ScannerUI::StreamModFinding>&
         SetupDiGetDeviceRegistryPropertyW(devInfo, &devData, SPDRP_HARDWAREID,
                                           nullptr, (PBYTE)hwid, sizeof(hwid), nullptr);
 
-        // M3: get service name → driver binary path → signature check
+
         wchar_t svcName[256] = {};
         SetupDiGetDeviceRegistryPropertyW(devInfo, &devData, SPDRP_SERVICE,
                                           nullptr, (PBYTE)svcName, sizeof(svcName), nullptr);
@@ -345,9 +329,9 @@ static void ScanVirtualDisplayAdapters(std::vector<ScannerUI::StreamModFinding>&
                 driverSigned = IsAuthenticodeSigned(driverPath);
         }
 
-        // Cryptographic + structural filter: if the backing driver is Authenticode-signed
-        // AND resides in System32/SysWOW64, it is a Microsoft kernel component (e.g.
-        // WUDFRd.sys — Windows Driver Framework Reflector). No need to report.
+
+
+
         if (!driverPath.empty() && driverSigned) {
             auto drvCls = DetectionFilter::ClassifyPath(driverPath);
             if (drvCls == DetectionFilter::PathClass::SystemTrusted)
@@ -363,16 +347,12 @@ static void ScanVirtualDisplayAdapters(std::vector<ScannerUI::StreamModFinding>&
             detail += driverSigned ? " [signed]" : " [UNSIGNED]";
         }
 
-        // M3: unsigned virtual display driver → HIGH instead of FLAG
+
         std::string sev = (!driverPath.empty() && !driverSigned) ? "HIGH" : "FLAG";
         AddStreamModFinding(out, "VIRTUAL_DISPLAY", "-", WideToUtf8(desc), detail, sev);
     }
     SetupDiDestroyDeviceInfoList(devInfo);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// P4 — DWM integrity: injected modules + RWX + M4 inline hook detection
-// ─────────────────────────────────────────────────────────────────────────────
 
 static DWORD FindDwmPid() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -398,25 +378,24 @@ static bool IsSystemModulePath(const std::wstring& path) {
     return up.find(L"\\WINDOWS\\") != std::wstring::npos;
 }
 
-// M4: Check if first bytes of a function look like a trampoline hook
 static bool IsHookPattern(const BYTE* b, size_t len, std::string& patternDesc) {
     if (len < 6) return false;
-    // JMP rel32: E9 xx xx xx xx
+
     if (b[0] == 0xE9) {
         patternDesc = "JMP rel32 (E9)";
         return true;
     }
-    // JMP [rip+x]: FF 25 xx xx xx xx
+
     if (b[0] == 0xFF && b[1] == 0x25) {
         patternDesc = "JMP [rip+x] (FF 25)";
         return true;
     }
-    // PUSH imm32; RET: 68 xx xx xx xx C3
+
     if (b[0] == 0x68 && len >= 6 && b[5] == 0xC3) {
         patternDesc = "PUSH+RET trampoline (68..C3)";
         return true;
     }
-    // MOV RAX, imm64; JMP RAX: 48 B8 ... FF E0 (12 bytes)
+
     if (b[0] == 0x48 && b[1] == 0xB8 && len >= 12 && b[10] == 0xFF && b[11] == 0xE0) {
         patternDesc = "MOV RAX,imm64; JMP RAX (48 B8..FF E0)";
         return true;
@@ -424,7 +403,6 @@ static bool IsHookPattern(const BYTE* b, size_t len, std::string& patternDesc) {
     return false;
 }
 
-// M4: Find remote base address of a named DLL in a target process (from already collected modules)
 static uintptr_t FindModuleBase(const std::vector<ModuleRange>& modules, const wchar_t* dllNameUp) {
     for (const auto& m : modules) {
         std::wstring nameUp = BaseNameFromPath(m.path);
@@ -435,15 +413,12 @@ static uintptr_t FindModuleBase(const std::vector<ModuleRange>& modules, const w
     return 0;
 }
 
-// M4: Resolve the single-hop destination of a detected trampoline (not a multi-hop
-// chain — one hop is enough to distinguish "redirects into a signed module" from
-// "redirects into anonymous/unsigned memory").
 static uintptr_t ComputeHookDestination(HANDLE hProc, uintptr_t hookAddr, const BYTE* buf, size_t len) {
-    if (len >= 5 && buf[0] == 0xE9) {                                   // JMP rel32
+    if (len >= 5 && buf[0] == 0xE9) {
         INT32 rel = *reinterpret_cast<const INT32*>(buf + 1);
         return hookAddr + 5 + (uintptr_t)(intptr_t)rel;
     }
-    if (len >= 6 && buf[0] == 0xFF && buf[1] == 0x25) {                 // JMP [rip+disp32]
+    if (len >= 6 && buf[0] == 0xFF && buf[1] == 0x25) {
         INT32 disp = *reinterpret_cast<const INT32*>(buf + 2);
         uintptr_t slot = hookAddr + 6 + (uintptr_t)(intptr_t)disp;
         uintptr_t dest = 0; SIZE_T r = 0;
@@ -451,11 +426,11 @@ static uintptr_t ComputeHookDestination(HANDLE hProc, uintptr_t hookAddr, const 
             return 0;
         return dest;
     }
-    if (len >= 6 && buf[0] == 0x68 && buf[5] == 0xC3) {                 // PUSH imm32; RET
+    if (len >= 6 && buf[0] == 0x68 && buf[5] == 0xC3) {
         DWORD imm = *reinterpret_cast<const DWORD*>(buf + 1);
         return (uintptr_t)imm;
     }
-    if (len >= 12 && buf[0] == 0x48 && buf[1] == 0xB8 && buf[10] == 0xFF && buf[11] == 0xE0) { // MOV RAX,imm64; JMP RAX
+    if (len >= 12 && buf[0] == 0x48 && buf[1] == 0xB8 && buf[10] == 0xFF && buf[11] == 0xE0) {
         return *reinterpret_cast<const uintptr_t*>(buf + 2);
     }
     return 0;
@@ -465,7 +440,7 @@ struct HookCheckEntry { const wchar_t* dll; const char* func; };
 
 static void ScanDwmInlineHooks(HANDLE hProc, const std::vector<ModuleRange>& modules,
                                 std::vector<ScannerUI::StreamModFinding>& out) {
-    // Functions known to be abused for DWM/composition hooking
+
     static const HookCheckEntry kTargets[] = {
         { L"DWMAPI.DLL",  "DwmFlush"                      },
         { L"DWMAPI.DLL",  "DwmBeginComposition"            },
@@ -480,7 +455,7 @@ static void ScanDwmInlineHooks(HANDLE hProc, const std::vector<ModuleRange>& mod
         uintptr_t remoteBase = FindModuleBase(modules, t.dll);
         if (!remoteBase) continue;
 
-        // Load DLL locally (without resolving imports) to get function RVA
+
         HMODULE hLocal = LoadLibraryExW(t.dll, nullptr,
                                         DONT_RESOLVE_DLL_REFERENCES | LOAD_LIBRARY_AS_DATAFILE);
         if (!hLocal) continue;
@@ -488,8 +463,8 @@ static void ScanDwmInlineHooks(HANDLE hProc, const std::vector<ModuleRange>& mod
         FARPROC localFunc = GetProcAddress(hLocal, t.func);
         if (!localFunc) { FreeLibrary(hLocal); continue; }
 
-        uintptr_t localBase = (uintptr_t)hLocal & ~0xFFFULL; // align to page
-        // For LOAD_LIBRARY_AS_DATAFILE the handle has the low bit set; strip it
+        uintptr_t localBase = (uintptr_t)hLocal & ~0xFFFULL;
+
         uintptr_t hBase = ((uintptr_t)hLocal) & ~(uintptr_t)3;
         uintptr_t rva   = (uintptr_t)localFunc - hBase;
         FreeLibrary(hLocal);
@@ -542,10 +517,10 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
         for (const auto& mod : modules) {
             if (mod.path.empty()) continue;
 
-            // Trust the Windows directory — it's OS-protected and all legitimate DWM
-            // components live there. Checking signatures within \WINDOWS\ causes false
-            // positives because IsCatalogSigned uses a driver GUID that doesn't cover
-            // all user-mode system DLLs. Any non-Windows DLL in DWM = injection.
+
+
+
+
             if (IsSystemModulePath(mod.path)) continue;
 
             BYTE hdr[4096] = {}; SIZE_T hg = 0;
@@ -561,24 +536,24 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
 
             std::string sev;
             if (!isSigned) {
-                sev = "HIGH";       // DLL nao assinada no compositor - sinal mais forte
+                sev = "HIGH";
             } else if (hasGfxExports) {
-                sev = "MEDIUM";     // assinada mas exporta simbolos graficos - hook de composicao plausivel
+                sev = "MEDIUM";
             } else {
-                sev = "FLAG";       // assinada, sem forma de hook grafico (patcher/ferramenta de acessibilidade)
+                sev = "FLAG";
             }
 
             AddStreamModFinding(out, "DWM_INJECT", "dwm.exe",
                 WideToUtf8(mod.path), detail, sev);
         }
-        // M4: inline hook detection
+
         ScanDwmInlineHooks(hProc, modules, out);
     }
 
-    // Private executable memory in DWM:
-    // RWX = always HIGH (write+exec simultaneously is inherently hostile).
-    // RX  = HIGH only with hard evidence: high entropy (≥7.2, packed shellcode)
-    //        or PE header (manually-mapped DLL). Normal system stubs are filtered out.
+
+
+
+
     MEMORY_BASIC_INFORMATION mbi = {};
     std::unordered_set<uintptr_t> seenDwm;
     for (uintptr_t addr = 0x10000; addr < 0x00007FFFFFFEFFFF; ) {
@@ -593,12 +568,12 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
         bool isRwx = (baseProtect == PAGE_EXECUTE_READWRITE || baseProtect == PAGE_EXECUTE_WRITECOPY);
         bool isRx  = (baseProtect == PAGE_EXECUTE || baseProtect == PAGE_EXECUTE_READ);
         if (!isRwx && !isRx) continue;
-        if (mbi.RegionSize < 0x1000) continue; // 4KB minimum — ignore tiny system stubs
+        if (mbi.RegionSize < 0x1000) continue;
 
         uintptr_t allocBase = (uintptr_t)mbi.AllocationBase;
         if (!seenDwm.insert(allocBase).second) continue;
 
-        // RX-only regions: require hard evidence before flagging
+
         if (isRx && !isRwx) {
             bool hasPE = DetectionFilter::HasPEHeader(hProc, mbi.BaseAddress);
             double entropy = DetectionFilter::ProcessRegionEntropy(hProc, mbi.BaseAddress, (size_t)mbi.RegionSize);
@@ -616,10 +591,6 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
     }
     CloseHandle(hProc);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// P5 — Topmost layered transparent overlay windows + M7 semi-transparent
-// ─────────────────────────────────────────────────────────────────────────────
 
 static bool IsWhitelistedOverlayProcess(const std::wstring& nameUp) {
     static const wchar_t* kList[] = {
@@ -642,11 +613,6 @@ static bool IsWhitelistedOverlayProcess(const std::wstring& nameUp) {
     return false;
 }
 
-// Legitimate screen-capture/desktop-customization tools that legitimately create
-// topmost/layered/transparent windows. Unlike IsWhitelistedOverlayProcess (an
-// unconditional skip), this list only exempts when the process is ALSO signed —
-// name alone is not a trust signal — so an unsigned/portable build still surfaces
-// at a low severity instead of being fully hidden.
 static bool IsKnownDesktopOverlayToolProcess(const std::wstring& nameUp) {
     static const wchar_t* kList[] = {
         L"GREENSHOT.EXE",
@@ -682,7 +648,7 @@ static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
     GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags);
     if (!(flags & LWA_ALPHA)) return TRUE;
 
-    // M7: flag fully invisible (alpha 0-8) as MEDIUM/FLAG, semi-transparent (9-80) as FLAG for unsigned
+
     const bool fullyInvisible  = alpha <= 8;
     const bool semiTransparent = alpha > 8 && alpha <= 80;
     if (!fullyInvisible && !semiTransparent) return TRUE;
@@ -699,9 +665,9 @@ static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
     bool signed_ = !procPath.empty() && IsAuthenticodeSigned(procPath);
 
     bool knownDesktopTool = IsKnownDesktopOverlayToolProcess(procName);
-    if (knownDesktopTool && signed_) return TRUE; // vendor-verified build of a known benign tool
+    if (knownDesktopTool && signed_) return TRUE;
 
-    // M7: semi-transparent signed process = too common to flag
+
     if (semiTransparent && signed_) return TRUE;
 
     char title[256] = {};
@@ -716,11 +682,11 @@ static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
     if (title[0]) { detail += ", title: \""; detail += title; detail += "\""; }
     if (!signed_)  detail += " [process unsigned]";
 
-    // Severity: fully invisible unsigned = MEDIUM, fully invisible signed = FLAG
-    //           semi-transparent unsigned = FLAG
+
+
     std::string sev = (fullyInvisible && !signed_) ? "MEDIUM" : "FLAG";
-    // Known desktop/capture tool but unsigned (e.g. portable ShareX/Rainmeter build) —
-    // still visible, but never above the lowest severity tier.
+
+
     if (knownDesktopTool && !signed_) sev = "FLAG";
 
     auto* ctx = reinterpret_cast<OverlayScanCtx*>(lParam);
@@ -736,10 +702,6 @@ static void ScanSuspiciousOverlayWindows(std::vector<ScannerUI::StreamModFinding
     OverlayScanCtx ctx{ &out };
     EnumWindows(OverlayScanProc, reinterpret_cast<LPARAM>(&ctx));
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// P6 (M5) — NvFBC AllowInternal registry flag
-// ─────────────────────────────────────────────────────────────────────────────
 
 static void ScanNvfbcRegistry(std::vector<ScannerUI::StreamModFinding>& out) {
     static const struct { HKEY root; const wchar_t* path; } kKeys[] = {
@@ -767,10 +729,6 @@ static void ScanNvfbcRegistry(std::vector<ScannerUI::StreamModFinding>& out) {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// P7 (M6) — Virtual camera / capture device detection
-// ─────────────────────────────────────────────────────────────────────────────
 
 static bool IsKnownVirtualCamera(const std::wstring& desc, bool& isSuspicious) {
     std::wstring up = desc;
@@ -829,21 +787,17 @@ static void ScanVirtualCameraDevices(std::vector<ScannerUI::StreamModFinding>& o
     SetupDiDestroyDeviceInfoList(devInfo);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public entry point
-// ─────────────────────────────────────────────────────────────────────────────
-
 std::vector<ScannerUI::StreamModFinding> CollectStreamModFindings(std::string& status) {
     std::vector<ScannerUI::StreamModFinding> findings;
 
-    ScanCaptureExcludedWindows(findings);   // P1
-    ScanStreamingPlugins(findings);         // P2 disk + M2 entropy
-    ScanObsRuntimeModules(findings);        // M1 OBS runtime injection
-    ScanVirtualDisplayAdapters(findings);   // P3 + M3 driver signing
-    ScanDwmIntegrity(findings);             // P4 + M4 inline hooks
-    ScanSuspiciousOverlayWindows(findings); // P5 + M7 semi-transparent
-    ScanNvfbcRegistry(findings);            // P6 NvFBC AllowInternal
-    ScanVirtualCameraDevices(findings);     // P7 virtual camera
+    ScanCaptureExcludedWindows(findings);
+    ScanStreamingPlugins(findings);
+    ScanObsRuntimeModules(findings);
+    ScanVirtualDisplayAdapters(findings);
+    ScanDwmIntegrity(findings);
+    ScanSuspiciousOverlayWindows(findings);
+    ScanNvfbcRegistry(findings);
+    ScanVirtualCameraDevices(findings);
 
     if (findings.empty()) {
         status = "OK";

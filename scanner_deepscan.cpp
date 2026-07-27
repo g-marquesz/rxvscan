@@ -1,13 +1,5 @@
 #include "scanner_core.h"
 
-// Detectores do DeepScan entram aqui como funcoes Scan*(std::vector<ScannerUI::DeepScanFinding>&)
-// e sao chamados em sequencia dentro de CollectDeepScanFindings, no mesmo padrao de
-// scanner_stream_mods.cpp / scanner_generic_bypass.cpp.
-
-// ============================================================================
-// PLScan — deteccao de payload/shellcode injetado em memoria de processos.
-// ============================================================================
-
 static std::string HexAddress(uintptr_t value) {
     std::ostringstream oss;
     oss << "0x" << std::uppercase << std::hex << value;
@@ -28,11 +20,6 @@ static void AddDeepScanFinding(std::vector<ScannerUI::DeepScanFinding>& out,
     out.push_back(std::move(finding));
 }
 
-// Boot time cacheado (nao muda durante um scan) - usado pelo LXAScan e pelo
-// HJCScan para nao reportar arquivos antigos (de antes do boot atual): um
-// arquivo que ja estava la antes desta sessao ligar e um sinal bem mais fraco
-// do que um tocado durante a sessao atual. Mesmo padrao "modifiedAfterBoot"
-// ja usado em varios pontos do projeto (ex. scanner_files.cpp:1638).
 static ULONGLONG DeepScanBootTimeU64() {
     static const ULONGLONG bootValue = FileTimeToU64(GetBootFileTime());
     return bootValue;
@@ -53,10 +40,6 @@ static bool IsWriteExecProtect(DWORD protect) {
     return base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
-// So regioes privadas (nao mapeadas de arquivo/modulo) e executaveis interessam ao PLScan:
-// shellcode/payload injetado precisa ser executavel para rodar, e codigo legitimo de DLL
-// mora em MEM_IMAGE (ja coberto por outros topicos). Isso reduz custo (pula a maior parte
-// do espaco de enderecos) e ruido (heap/stack normais nunca sao PAGE_EXECUTE*).
 static bool IsPrivateExecRegion(const MEMORY_BASIC_INFORMATION& mbi) {
     return mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && IsExecProtect(mbi.Protect);
 }
@@ -91,11 +74,11 @@ namespace {
 
 struct BytePattern {
     const char* name;
-    std::vector<int> bytes; // -1 = wildcard byte
-    // Padroes "fracos" aparecem em codigo legitimo compilado/JIT (cookie de
-    // stack /GS, acesso a TLS, exception handling, engines JIT V8/CLR/HotSpot,
-    // runtimes .NET NativeAOT/Rust com syscall direto) - sozinhos (sem string
-    // corroborando) so devem contar quando a regiao tem entropia de codigo.
+    std::vector<int> bytes;
+
+
+
+
     bool weak = false;
 };
 
@@ -114,7 +97,6 @@ struct StringNeedle {
     const char* text;
 };
 
-// Marcadores de alto sinal: qualquer ocorrencia isolada ja e suspeita o bastante.
 const std::vector<StringNeedle>& HighSignalStrings() {
     static const std::vector<StringNeedle> needles = {
         {"WinExec"}, {"ShellExecuteA"}, {"ShellExecuteW"},
@@ -126,7 +108,7 @@ const std::vector<StringNeedle>& HighSignalStrings() {
     return needles;
 }
 
-} // namespace
+}
 
 static bool ContainsAscii(const unsigned char* data, size_t len, const char* needle) {
     size_t nlen = std::strlen(needle);
@@ -135,9 +117,6 @@ static bool ContainsAscii(const unsigned char* data, size_t len, const char* nee
     return std::search(data, data + len, nbeg, nbeg + nlen) != data + len;
 }
 
-// Busca por padroes de bytes de shellcode conhecidos. A comparacao usa
-// `i + pattern.size() <= len` (soma) em vez de `i <= len - pattern.size()` (subtracao)
-// para nao estourar quando len < pattern.size() (size_t e sem sinal).
 static bool ScanBytePatterns(const unsigned char* data, size_t len, std::string& matchedName, bool& matchedWeak) {
     for (const auto& pattern : ShellcodePatterns()) {
         size_t plen = pattern.bytes.size();
@@ -161,10 +140,6 @@ static bool ScanBytePatterns(const unsigned char* data, size_t len, std::string&
     return false;
 }
 
-// Strings fracas ("payload", "execute", "run") geram falso positivo em quase qualquer
-// binario. Em vez disso: marcadores de alto sinal isolados, ou pares que so fazem sentido
-// juntos (LoadLibrary+GetProcAddress = resolucao dinamica de API; powershell+-enc = comando
-// codificado em base64, tecnica classica de stager).
 static bool ScanStrings(const unsigned char* data, size_t len, std::string& matchedName) {
     for (const auto& needle : HighSignalStrings()) {
         if (ContainsAscii(data, len, needle.text)) {
@@ -192,17 +167,6 @@ static bool ScanStrings(const unsigned char* data, size_t len, std::string& matc
     return false;
 }
 
-// Uma passada por ciclo de scan (chamada de CollectDeepScanFindings, disparada pelo
-// scanner_runner.cpp) — sem thread/loop proprio. Enumera processos, restringe a varredura
-// a regioes privadas executaveis (onde shellcode injetado precisa viver para rodar) e
-// classifica em cascata: PE header reflectivo > entropia (pega payload empacotado/cifrado
-// que assinatura estatica nunca pegaria) > assinaturas de bytes/strings.
-//
-// Sem filtro de "arquivo antigo antes do boot" (diferente do LXAScan/HJCScan):
-// nao ha arquivo em disco aqui, so memoria de processos VIVOS agora - um
-// processo nao sobrevive a um reboot, entao todo processo enumerado abaixo
-// ja e, por definicao, posterior ao boot atual. Nao existe achado "antigo"
-// pra excluir.
 static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
     DWORD ownPid = GetCurrentProcessId();
 
@@ -220,13 +184,13 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
             DWORD pid = entry.th32ProcessID;
             if (pid == 0 || pid == 4 || pid == ownPid) continue;
 
-            // Sem gate por pasta/assinatura do processo hospedeiro: a assinatura do
-            // CONTAINER nao valida o que foi injetado dentro dele (payload injetado
-            // nao tem e nao pode ter assinatura propria), e "esta em Program Files"
-            // e 100% controlavel pelo atacante. Mesma razao pela qual HJCScan/TRHScan
-            // ja nao pulam processo algum - atacante injeta de proposito em processos
-            // confiaveis pra se esconder. A discriminacao de falso-positivo fica
-            // inteiramente por conteudo via ClassifyExecRegion (entropia/tamanho) abaixo.
+
+
+
+
+
+
+
             HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
             if (!process)
                 process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
@@ -240,23 +204,23 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
 
             std::string procName = WideToUtf8(entry.szExeFile) + " [" + std::to_string(pid) + "]";
 
-            // Cap por processo: um unico processo ruidoso (muitas regioes
-            // legitimas que escapam do ClassifyExecRegion) nao pode consumir
-            // sozinho todo o orcamento global de achados antes de outros
-            // processos serem sequer olhados. Nao depende de identidade do
-            // processo - aplica-se igualmente a qualquer um.
+
+
+
+
+
             constexpr size_t kMaxFindingsPerProcess = 8;
             const size_t outSizeAtProcessStart = out.size();
 
             uintptr_t maxModuleEnd = 0;
             for (const auto& m : modules)
                 if (m.end > maxModuleEnd) maxModuleEnd = m.end;
-            constexpr uintptr_t kMinScan  = 2ULL * 1024 * 1024 * 1024;  // 2 GB floor
-            constexpr uintptr_t kHeadroom = 512ULL * 1024 * 1024;       // 512 MB acima dos modulos
+            constexpr uintptr_t kMinScan  = 2ULL * 1024 * 1024 * 1024;
+            constexpr uintptr_t kHeadroom = 512ULL * 1024 * 1024;
             const uintptr_t kScanLimit = (maxModuleEnd + kHeadroom > kMinScan)
                                           ? (maxModuleEnd + kHeadroom) : kMinScan;
 
-            constexpr size_t kMaxRegionRead = 256 * 1024; // cap por regiao (o exemplo original lia RegionSize inteiro, sem limite)
+            constexpr size_t kMaxRegionRead = 256 * 1024;
             constexpr size_t kChunk = 64 * 1024;
 
             uintptr_t address = 0;
@@ -269,7 +233,7 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
 
                 uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
                 uintptr_t end = base + mbi.RegionSize;
-                if (end <= address) break; // regiao invalida/zerada: nao trava o laco
+                if (end <= address) break;
 
                 if (out.size() >= ScanLimits::kMaxDeepScanFindings) break;
                 if (out.size() - outSizeAtProcessStart >= kMaxFindingsPerProcess) break;
@@ -283,7 +247,7 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
 
                 uintptr_t allocBase = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
                 if (mbi.AllocationBase && !seenAllocBases.insert(allocBase).second) {
-                    address = end; // ja processamos esta alocacao (regiao vizinha da mesma reserva)
+                    address = end;
                     continue;
                 }
 
@@ -298,7 +262,7 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
                                             buf.data() + off, chunkLen, &chunkGot))
                         break;
                     got += chunkGot;
-                    if (chunkGot < chunkLen) break; // leitura parcial: nao escaneia alem do que foi lido de fato
+                    if (chunkGot < chunkLen) break;
                 }
                 if (got == 0) {
                     address = end;
@@ -322,7 +286,7 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
                 bool writeExec = IsWriteExecProtect(mbi.Protect);
                 DetectionFilter::RegionVerdict verdict = DetectionFilter::ClassifyExecRegion(
                     writeExec, static_cast<size_t>(mbi.RegionSize), entropy,
-                    /*privateMem*/ true, /*hasPeHeader*/ false);
+                     true,  false);
                 if (verdict.keep) {
                     AddDeepScanFinding(out, "PLSCAN", procName, addrHex, verdict.note, verdict.severity);
                     address = end;
@@ -336,14 +300,14 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
                 bool stringHit = ScanStrings(buf.data(), got, stringName);
 
                 bool codeLike = entropy >= DetectionFilter::kCodeLow && entropy <= DetectionFilter::kCodeHigh;
-                // Padrao fraco sozinho (sem string corroborando) so conta se a
-                // regiao tiver entropia de codigo E tamanho razoavel (>= 4KB,
-                // uma pagina) - caso contrario e mais provavel coincidencia de
-                // bytes numa regiao que nao parece codigo de verdade, ou um
-                // trampolim minusculo tipo Detours (o unico jeito de uma
-                // regiao pequena chegar aqui e via o descarte de "RWX pequeno
-                // sem entropia de codigo" do ClassifyExecRegion), do que um
-                // sinal real de shellcode.
+
+
+
+
+
+
+
+
                 if (patternHit && patternWeak && !stringHit && (!codeLike || got < 4096))
                     patternHit = false;
 
@@ -352,9 +316,9 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
                         "Padrao de shellcode (" + patternName + ") + string suspeita (" + stringName + ")",
                         "HIGH");
                 } else if (patternHit || stringHit) {
-                    // Sinal isolado numa regiao de baixa entropia (nao parece
-                    // codigo) e mais fraco ainda - rebaixa um degrau em vez de
-                    // descartar, mantendo visibilidade sem inflar severidade.
+
+
+
                     std::string severity = (entropy >= 0.0 && entropy < DetectionFilter::kCodeLow)
                         ? "FLAG" : "MEDIUM";
                     if (patternHit) {
@@ -376,27 +340,8 @@ static void ScanInjectedPayloads(std::vector<ScannerUI::DeepScanFinding>& out) {
     CloseHandle(snapshot);
 }
 
-// ============================================================================
-// HJCScan — deteccao de DLL hijacking (search-order/sideloading) e API
-// hooking em modulos legitimamente carregados.
-//
-// Nao reimplementa deteccao de "reflective loader": um modulo obtido via
-// CollectProcessModules/EnumProcessModules ja esta registrado no loader do
-// Windows e por definicao sempre comeca com um header PE valido — reflective
-// loading de verdade nunca aparece nessa lista (o proprio nome da tecnica vem
-// de nao se registrar no loader). Quem cobre isso de verdade e o branch
-// HasPEHeader em memoria privada do PLScan (acima); adulteracao de um modulo
-// ja carregado (checksum disco vs. memoria) ja e coberta por
-// ScanLoadedModuleAnomalies em scanner_processes.cpp. Portar aqui uma
-// checagem de "o modulo comeca com MZ/PE" seria ruido puro (dispara em 100%
-// dos modulos carregados) ou duplicacao do que ja existe.
-// ============================================================================
-
 namespace {
 
-// DLLs classicas usadas como alvo de search-order hijacking / DLL planting —
-// arquivos do Windows que nunca sao legitimamente redistribuidos ao lado de
-// um executavel de terceiros (lista pode crescer).
 const wchar_t* const kHijackableDlls[] = {
     L"VERSION.DLL", L"DWMAPI.DLL", L"UXTHEME.DLL", L"CRYPTBASE.DLL",
     L"PROPSYS.DLL", L"UALAPI.DLL", L"PROFAPI.DLL", L"SECUR32.DLL",
@@ -418,8 +363,6 @@ struct HookApiTarget {
     const char* apiName;
 };
 
-// Alvos classicos de API hooking (do exemplo original) — sempre resolvidos
-// contra kernel32/kernelbase/user32/ntdll, nunca DLLs de terceiros.
 const HookApiTarget kHookTargets[] = {
     {L"kernel32.dll", "CreateProcessA"},
     {L"kernel32.dll", "CreateProcessW"},
@@ -434,12 +377,8 @@ const wchar_t* const kHookCandidateModules[] = {
     L"KERNEL32.DLL", L"KERNELBASE.DLL", L"USER32.DLL", L"NTDLL.DLL", nullptr
 };
 
-} // namespace
+}
 
-// Normaliza via GetFinalPathNameByHandleW antes de comparar - fecha a via de
-// disfarce por truque de path do NTFS (espaco/ponto no final de um nome de
-// pasta, nome curto 8.3) que pode fazer um caminho PARECER System32 sem ser,
-// deixando um sideload passar como "sistema" e ser ignorado por engano.
 static bool HjcIsSystemPath(const std::wstring& path) {
     const auto& r = DetectionFilter::Roots();
 
@@ -453,7 +392,7 @@ static bool HjcIsSystemPath(const std::wstring& path) {
         CloseHandle(hFile);
         if (len > 0 && len < std::size(buf)) {
             std::wstring norm = buf;
-            if (norm.rfind(L"\\\\?\\", 0) == 0) norm = norm.substr(4); // remove o prefixo de path estendido
+            if (norm.rfind(L"\\\\?\\", 0) == 0) norm = norm.substr(4);
             normalized = norm;
         }
     }
@@ -464,21 +403,12 @@ static bool HjcIsSystemPath(const std::wstring& path) {
            DetectionFilter::PathIsUnder(up, r.winsxs);
 }
 
-// Reaproveita DetectionFilter::AnalyzeEfiPe (parser PE generico apesar do
-// nome - funciona em qualquer arquivo PE, nao so .efi) + CheckPeChecksumMismatch
-// pra detectar arquivo alterado depois de compilado/assinado - sinal de
-// integridade que nenhuma pasta ou nome consegue disfarçar.
 static bool HjcHasChecksumMismatch(const std::wstring& path) {
     DetectionFilter::EfiPeInfo info = DetectionFilter::AnalyzeEfiPe(path);
     if (!info.valid || info.storedChecksum == 0) return false;
     return DetectionFilter::CheckPeChecksumMismatch(path, info.storedChecksum);
 }
 
-// Entropia do arquivo (nao da memoria carregada) de uma DLL - mesmo estilo de
-// leitura capada ja usado em EhkReadPeSections, para reusar ShannonEntropy
-// como corroboracao do tier "nao assinado": uma DLL nao assinada de baixa
-// entropia (utilitario antigo comum) e sinal mais fraco do que uma nao
-// assinada E empacotada/ofuscada. Retorna -1.0 em caso de falha de leitura.
 static double HjcFileEntropy(const std::wstring& path) {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -502,23 +432,13 @@ static double HjcFileEntropy(const std::wstring& path) {
     return DetectionFilter::ShannonEntropy(buf.data(), got);
 }
 
-// So considera uma DLL se o arquivo foi tocado durante a sessao atual
-// (pos-boot) - uma DLL classica de sideloading que ja estava la antes desta
-// sessao ligar e um sinal bem mais fraco (ou completamente irrelevante para
-// uma ameaca ativa) do que uma escrita/plantada recentemente.
 static bool HjcFileIsAfterBoot(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
-        return true; // nao foi possivel checar - nao descarta por causa disso
+        return true;
     return IsAfterBoot(fad.ftLastWriteTime);
 }
 
-// Sub-detector A: DLL search-order hijacking / sideloading. Reaproveita a
-// mesma cascata de decisao ja validada em producao por
-// ScanDuplicateGraphicsModules (scanner_generic_bypass.cpp), generalizada
-// para todos os processos e uma lista de DLLs classicas de sideloading
-// (nao-graficas). Sem gate de "processo confiavel": hijacking existe
-// justamente para atacar hosts assinados/confiaveis.
 static void ScanDllSideloading(const std::string& procName,
                                 const std::wstring& exePathW, const std::wstring& exeDir,
                                 const std::vector<ModuleRange>& modules,
@@ -536,25 +456,25 @@ static void ScanDllSideloading(const std::string& procName,
 
         const ModuleRange* m = kv.second.front();
         if (HjcIsSystemPath(m->path)) continue;
-        if (!HjcFileIsAfterBoot(m->path)) continue; // arquivo antigo (de antes do boot atual) - ignora
+        if (!HjcFileIsAfterBoot(m->path)) continue;
 
         bool sideBySide = !exeDir.empty() &&
             DetectionFilter::PathIsUnder(DetectionFilter::UpperW(m->path), DetectionFilter::UpperW(exeDir));
         bool signedMod = DetectionFilter::IsTrustedSignedCached(m->path);
         bool samePub   = signedMod && DetectionFilter::SamePublisherTrusted(m->path, exePathW);
 
-        if (samePub) continue; // DLL legitimamente distribuida pelo mesmo publisher do host
+        if (samePub) continue;
 
-        // Severidade nunca depende de pasta/nome - so de conteudo (entropia,
-        // integridade do PE) e assinatura (propriedade criptografica do
-        // proprio arquivo, mantida como sinal por decisao explicita, ao
-        // contrario de "esta em Program Files" que o atacante controla de graca).
+
+
+
+
         double fileEntropy = HjcFileEntropy(m->path);
         bool packedLike = fileEntropy >= DetectionFilter::kCodeHigh;
         bool tampered = HjcHasChecksumMismatch(m->path);
-        // A signed DLL from another publisher is not enough to prove a hijack:
-        // applications commonly ship signed runtimes beside their executable.
-        // Keep it only when the file also has a concrete integrity signal.
+
+
+
         if (signedMod && !tampered)
             continue;
         if (!sideBySide && !packedLike && !tampered)
@@ -562,7 +482,7 @@ static void ScanDllSideloading(const std::string& procName,
 
         std::string severity;
         if (packedLike || tampered) {
-            severity = "HIGH"; // empacotada/adulterada - nenhuma assinatura muda isso
+            severity = "HIGH";
         } else {
             severity = sideBySide ? "MEDIUM" : "FLAG";
         }
@@ -581,13 +501,13 @@ static void ScanDllSideloading(const std::string& procName,
         AddDeepScanFinding(out, "HJCSCAN", procName, WideToUtf8(m->path), detail, severity);
     }
 
-    // DLL da lista presente no diretorio do exe mas ainda nao carregada — hijack preparado/staged.
+
     if (!exeDir.empty()) {
         for (int i = 0; kHijackableDlls[i]; ++i) {
             if (out.size() >= ScanLimits::kMaxDeepScanFindings) return;
             std::wstring candidate = exeDir + L"\\" + kHijackableDlls[i];
             if (!FileExistsW(candidate)) continue;
-            if (!HjcFileIsAfterBoot(candidate)) continue; // arquivo antigo (de antes do boot atual) - ignora
+            if (!HjcFileIsAfterBoot(candidate)) continue;
 
             auto it = byName.find(kHijackableDlls[i]);
             if (it != byName.end()) {
@@ -632,12 +552,6 @@ static void ScanDllSideloading(const std::string& procName,
     }
 }
 
-// Resolve o endereco local (no proprio processo do scanner) de uma API alvo e
-// o offset a partir da base do modulo que REALMENTE a contem. Necessario
-// porque varios exports de kernel32.dll sao forwarders para kernelbase.dll
-// desde o Windows 7 — GetProcAddress segue o forwarder e retorna um endereco
-// dentro de kernelbase.dll, nao de kernel32.dll. O offset base->export e fixo
-// pelo layout do arquivo e independe de ASLR (que randomiza so a base).
 static bool ResolveLocalExportOffset(const wchar_t* moduleName, const char* apiName,
                                       std::wstring& containingModuleUpperName,
                                       uintptr_t& offset, size_t& moduleSizeOfImage) {
@@ -662,15 +576,9 @@ static bool ResolveLocalExportOffset(const wchar_t* moduleName, const char* apiN
             return true;
         }
     }
-    return false; // endereco fora de todos os candidatos: nao arrisca
+    return false;
 }
 
-// Sub-detector B: API hooking em exports criticos de kernel32/kernelbase/
-// user32/ntdll. Traduz o endereco local (resolvido via GetProcAddress) para
-// o processo remoto usando o mesmo offset relativo a base do modulo — valido
-// porque esses arquivos sao identicos byte-a-byte entre processos na mesma
-// maquina/build. Escopo estrito a esses 4 modulos: para DLLs de terceiros a
-// premissa de arquivo identico local/remoto nao vale.
 static void ScanApiHooking(HANDLE process, const std::string& procName,
                             const std::vector<ModuleRange>& modules,
                             std::vector<ScannerUI::DeepScanFinding>& out) {
@@ -696,8 +604,8 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
         }
         if (!remoteModule) continue;
 
-        // Build diferente no alvo (ex.: WOW64) teria layout diferente — offset
-        // local nao seria valido ali. Descarta em vez de arriscar um veredito errado.
+
+
         size_t remoteSize = static_cast<size_t>(remoteModule->end - remoteModule->begin);
         if (remoteSize != localSize) continue;
 
@@ -710,14 +618,14 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
             continue;
 
         uintptr_t hookTarget = 0;
-        if (prologue[0] == 0xE9) { // JMP rel32
+        if (prologue[0] == 0xE9) {
             INT32 rel = 0;
             memcpy(&rel, prologue + 1, sizeof(rel));
             hookTarget = remoteFuncAddr + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel));
-        } else if (prologue[0] == 0xEB && got >= 2) { // JMP rel8
+        } else if (prologue[0] == 0xEB && got >= 2) {
             const INT8 rel = static_cast<INT8>(prologue[1]);
             hookTarget = remoteFuncAddr + 2 + static_cast<uintptr_t>(static_cast<intptr_t>(rel));
-        } else if (prologue[0] == 0xFF && prologue[1] == 0x25 && got >= 6) { // JMP [rip+disp32], x64
+        } else if (prologue[0] == 0xFF && prologue[1] == 0x25 && got >= 6) {
             INT32 disp = 0;
             memcpy(&disp, prologue + 2, sizeof(disp));
             uintptr_t slot = remoteFuncAddr + 6 + static_cast<uintptr_t>(static_cast<intptr_t>(disp));
@@ -728,22 +636,22 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
                 continue;
             hookTarget = indirectTarget;
         } else if (got >= 12 && prologue[0] == 0x48 && prologue[1] == 0xB8 &&
-                   prologue[10] == 0xFF && prologue[11] == 0xE0) { // MOV RAX,imm64; JMP RAX
+                   prologue[10] == 0xFF && prologue[11] == 0xE0) {
             memcpy(&hookTarget, prologue + 2, sizeof(hookTarget));
         } else if (got >= 13 && prologue[0] == 0x49 && prologue[1] == 0xBB &&
-                   prologue[10] == 0x41 && prologue[11] == 0xFF && prologue[12] == 0xE3) { // MOV R11,imm64; JMP R11
+                   prologue[10] == 0x41 && prologue[11] == 0xFF && prologue[12] == 0xE3) {
             memcpy(&hookTarget, prologue + 2, sizeof(hookTarget));
-        } else if (got >= 6 && prologue[0] == 0x68 && prologue[5] == 0xC3) { // PUSH imm32; RET
+        } else if (got >= 6 && prologue[0] == 0x68 && prologue[5] == 0xC3) {
             DWORD target32 = 0;
             memcpy(&target32, prologue + 1, sizeof(target32));
             hookTarget = target32;
         } else if (got >= 7 && prologue[0] == 0xB8 &&
-                   prologue[5] == 0xFF && prologue[6] == 0xE0) { // MOV EAX,imm32; JMP EAX
+                   prologue[5] == 0xFF && prologue[6] == 0xE0) {
             DWORD target32 = 0;
             memcpy(&target32, prologue + 1, sizeof(target32));
             hookTarget = target32;
         } else {
-            continue; // sem prologo de jmp/call: funcao nao hookeada
+            continue;
         }
 
         if (hookTarget == 0)
@@ -757,10 +665,10 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
         std::string severity;
 
         if (targetModule) {
-            // Hook redirecionando para dentro de um modulo assinado/confiavel
-            // (ex.: a propria DLL de um EDR/AV hookando sua propria API) e um
-            // sinal bem mais fraco do que redirecionar para um modulo
-            // desconhecido/nao assinado.
+
+
+
+
             bool targetSigned = DetectionFilter::IsTrustedSignedCached(targetModule->path);
             severity = targetSigned ? "FLAG" : "MEDIUM";
             if (!targetSigned)
@@ -768,12 +676,12 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
             detail += " (dentro de " + WideToUtf8(BaseNameFromPath(targetModule->path)) +
                       ", assinado=" + (targetSigned ? "yes" : "no") + ")";
         } else {
-            // Fora de qualquer modulo: pode ser um stub de shellcode real, mas
-            // tambem e exatamente o perfil de um trampolim Detours legitimo
-            // (EDR/AV, overlay de jogo/captura, RTSS, etc.). Usa tamanho da
-            // regiao + entropia para diferenciar: trampolim pequeno e nao
-            // empacotado fica MEDIUM; regiao grande ou com entropia de
-            // packer/shellcode mantem HIGH.
+
+
+
+
+
+
             MEMORY_BASIC_INFORMATION targetMbi = {};
             bool smallCleanTrampoline = false;
             if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(hookTarget), &targetMbi, sizeof(targetMbi)) == sizeof(targetMbi) &&
@@ -800,9 +708,9 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
         AddDeepScanFinding(out, "HJCSCAN", procName, target.apiName, detail, severity);
     }
 
-    // Hooks de EDR/AV frequentemente cobrem varias APIs, mas terminam em um
-    // modulo assinado. So agrega HIGH quando pelo menos dois destinos sao
-    // realmente nao confiaveis/privados; quantidade isolada nao e evidencia.
+
+
+
     if (suspiciousHookCount >= 2) {
         AddDeepScanFinding(out, "HJCSCAN", procName, "multiple-apis",
             std::to_string(hookedApiCount) + " exports redirecionados; " +
@@ -811,11 +719,6 @@ static void ScanApiHooking(HANDLE process, const std::string& procName,
     }
 }
 
-// Uma passada por ciclo de scan, mesmo esqueleto de ScanInjectedPayloads
-// (Toolhelp32Snapshot, fallback de dois niveis no OpenProcess,
-// CollectProcessModules) — mas SEM o gate de "processo confiavel" do PLScan:
-// DLL hijacking e API hooking existem justamente para atacar processos
-// assinados/confiaveis e herdar sua confianca.
 static void ScanDllHijacking(std::vector<ScannerUI::DeepScanFinding>& out) {
     DWORD ownPid = GetCurrentProcessId();
 
@@ -860,13 +763,6 @@ static void ScanDllHijacking(std::vector<ScannerUI::DeepScanFinding>& out) {
     CloseHandle(snapshot);
 }
 
-// ============================================================================
-// EHKScan — hooks em secoes PE de bootloaders EFI, assinatura/hash e baseline
-// de PCR do TPM 2.0.
-// ============================================================================
-
-// Helpers locais (mirror de scanner_platform.cpp - static/arquivo local,
-// mesma convencao ja usada no PLScan/HJCScan: nao compartilhado via header).
 static uint16_t EhkReadBe16(const BYTE* p) {
     return (uint16_t)((p[0] << 8) | p[1]);
 }
@@ -940,12 +836,6 @@ struct EhkPeSection {
     uint32_t va = 0, vsize = 0, ptrRaw = 0, sizeRaw = 0, characteristics = 0;
 };
 
-// Le o arquivo inteiro (cap ~8MB) e faz parsing manual do header DOS/PE/tabela
-// de secoes - mesmo layout ja usado e validado em ScanNtdllStubIntegrity
-// (scanner_generic_bypass.cpp) e em DetectionFilter::AnalyzeEfiPe: peOffset em
-// 0x3C, numSec em peOff+6, optSize em peOff+20, tabela de secoes em
-// peOff+24+optSize, entradas de 40 bytes. AnalyzeEfiPe nao expoe os bytes das
-// secoes ao chamador (so flags resumo) - por isso este leitor proprio.
 static bool EhkReadPeSections(const std::wstring& path, std::vector<BYTE>& fileBytes,
                                std::vector<EhkPeSection>& sections, uint32_t& entryRVA) {
     entryRVA = 0;
@@ -982,7 +872,7 @@ static bool EhkReadPeSections(const std::wstring& path, std::vector<BYTE>& fileB
     if ((DWORD)peOff + 44 <= got)
         entryRVA = *reinterpret_cast<const uint32_t*>(buf + peOff + 40);
 
-    if (numSec > 96) numSec = 96; // mesmo teto defensivo do AnalyzeEfiPe
+    if (numSec > 96) numSec = 96;
 
     DWORD secTableOff = (DWORD)peOff + 24 + optSize;
     sections.reserve(numSec);
@@ -1014,13 +904,6 @@ static bool EhkRvaInsideAnySection(uint32_t rva, const std::vector<EhkPeSection>
     return false;
 }
 
-// Resolve o RVA de destino de um JMP de 5 bytes (E9 rel32) ou 6 bytes
-// (FF 25 disp32, x64) lido do INICIO de uma secao no arquivo em disco (nao de
-// memoria remota como no PLScan/HJCScan). Para FF25 o disp aponta para um slot
-// de IAT que so contem o ponteiro final quando a imagem esta carregada em
-// memoria - no arquivo usamos o proprio RVA do slot como "destino" do teste:
-// um slot legitimo de IAT fica dentro de uma secao de dados conhecida; um
-// slot fora de qualquer secao do arquivo ja e o sinal de hook.
 static bool EhkResolveJumpTargetRVA(const BYTE* data, size_t len, uint32_t selfRVA, uint32_t& targetRVA) {
     if (len >= 5 && data[0] == 0xE9) {
         int32_t rel = *reinterpret_cast<const int32_t*>(data + 1);
@@ -1035,10 +918,6 @@ static bool EhkResolveJumpTargetRVA(const BYTE* data, size_t len, uint32_t selfR
     return false;
 }
 
-// Rebaixa um degrau de severidade quando o arquivo e assinado - um .efi
-// legitimamente assinado e um sinal isolado (NOP-sled/jump/entropia) juntos
-// sao muito menos indicativos de bootkit do que o mesmo sinal num arquivo
-// sem assinatura. Nao suprime a finding, so tempera a severidade.
 static std::string EhkDowngradeIfSigned(const std::string& severity, bool signedFile) {
     if (!signedFile) return severity;
     if (severity == "HIGH") return "MEDIUM";
@@ -1046,32 +925,19 @@ static std::string EhkDowngradeIfSigned(const std::string& severity, bool signed
     return severity;
 }
 
-// Parte 1: hooks em secoes PE. Reusa DetectionFilter::AnalyzeEfiPe (ja
-// existente) para os sinais de entry-point/estrutura sem duplicar a logica
-// dela, e adiciona o que nao existe em nenhum lugar do projeto: escanear o
-// CORPO das secoes executaveis. Restrito ao INICIO de cada secao (nao a
-// secao inteira) - o mesmo motivo do PLScan/HJCScan: E8/FF25 sozinhos
-// aparecem centenas de vezes em qualquer binario compilado normal; uma
-// secao/funcao legitima nunca COMECA com esse padrao, e padding de
-// alinhamento fica no FIM da secao, nao no inicio. So marca HIGH quando o
-// destino do jump e resolvido E cai fora de qualquer secao da propria
-// imagem (mesma ideia do IsAddrInModules do HJCScan, aplicada as secoes de
-// um unico arquivo EFI). Entropia (igual em espirito ao PLScan) e status de
-// assinatura reduzem o falso positivo: sinal isolado num arquivo assinado
-// vira severidade mais baixa em vez de HIGH direto.
 static void ScanEfiSectionHooks(const std::wstring& path, const std::string& fileLabel,
                                  const std::vector<BYTE>& fileBytes,
                                  const std::vector<EhkPeSection>& sections,
                                  uint32_t entryRVA, bool signedFile,
                                  std::vector<ScannerUI::DeepScanFinding>& out) {
-    constexpr uint32_t kMinSectionSize = 32; // piso para descartar stubs/reserva sem conteudo real
+    constexpr uint32_t kMinSectionSize = 32;
 
     DetectionFilter::EfiPeInfo pe = DetectionFilter::AnalyzeEfiPe(path);
     if (pe.valid) {
         if (pe.epHooked) {
-            // So reporta se a secao que contem o entry point tiver conteudo
-            // de verdade (nao uma secao degenerada/quase vazia, onde um match
-            // de padrao e provavelmente coincidencia).
+
+
+
             bool entrySectionMeaningful = false;
             for (const auto& s : sections) {
                 uint32_t effSz = s.vsize ? s.vsize : s.sizeRaw;
@@ -1108,10 +974,10 @@ static void ScanEfiSectionHooks(const std::wstring& path, const std::string& fil
         const BYTE* start = fileBytes.data() + sec.ptrRaw;
         size_t avail = fileBytes.size() - sec.ptrRaw;
 
-        // Entropia do corpo da secao (ate 64 KB) - sinal independente do
-        // NOP-sled/jump: uma secao "executavel" com entropia de dado
-        // empacotado/cifrado e suspeita por si so, igual ao PLScan em
-        // memoria de processo.
+
+
+
+
         size_t entropyLen = avail < kMaxEntropyWindow ? avail : kMaxEntropyWindow;
         double entropy = DetectionFilter::ShannonEntropy(start, entropyLen);
         if (entropy >= DetectionFilter::kPackedEntropy) {
@@ -1145,24 +1011,17 @@ static void ScanEfiSectionHooks(const std::wstring& path, const std::string& fil
     }
 }
 
-// Parte 2: assinatura + hash. Reusa as mesmas primitivas globais ja usadas
-// pela pagina EFI Cheat Detect (IsAuthenticodeSigned/CheckProtectedBootBaseline)
-// em vez de reimplementar verificacao de assinatura/hash do zero - aqui e so
-// um sinal mais leve e proprio do DeepScan, com chave de baseline propria
-// ("EHKSCAN.HASH:") para nao colidir com a baseline da pagina EFI Cheat
-// Detect ("EFI:"). signedFile/fileEntropy vem do orquestrador (evita
-// recomputar assinatura/entropia, ja feitas para a Parte 1).
 static void ScanEfiSignatureAndHash(const std::wstring& path, const std::string& fileLabel,
                                      const std::vector<BYTE>& fileBytes,
                                      bool signedFile, double fileEntropy,
                                      std::vector<ScannerUI::DeepScanFinding>& out) {
     if (!signedFile) {
-        // Bootloaders sem assinatura sao comuns em dual-boot e ferramentas de
-        // manutencao. A ausencia de assinatura isolada fica em FLAG; a
-        // entropia alta ainda sobe para HIGH.
+
+
+
         bool packedLike = fileEntropy >= DetectionFilter::kCodeHigh;
-        // A ausencia isolada de assinatura e comum em dual-boot e nao
-        // constitui evidencia suficiente para criar um card.
+
+
         if (packedLike) {
             std::string severity = "HIGH";
             std::string detail = "Bootloader EFI sem assinatura Authenticode valida";
@@ -1181,10 +1040,10 @@ static void ScanEfiSignatureAndHash(const std::wstring& path, const std::string&
     std::string key = "EHKSCAN.HASH:" + WideToUtf8(ToUpperInvariant(path));
     ProtectedBaselineResult result = CheckProtectedBootBaseline(key, hashHex, prevHash);
     if (result == ProtectedBaselineResult::Changed) {
-        // Se a versao NOVA esta assinada, e mais consistente com uma
-        // atualizacao legitima do bootloader do que com um bootkit trocando
-        // o arquivo - mesma excecao ja usada pela pagina EFI Cheat Detect
-        // para rotacao de arquivos assinados.
+
+
+
+
         std::string severity = signedFile ? "MEDIUM" : "HIGH";
         std::string detail = "Hash SHA-256 do bootloader mudou desde a ultima observacao (" +
             prevHash.substr(0, 12) + "... -> " + hashHex.substr(0, 12) + "...)";
@@ -1196,13 +1055,6 @@ static void ScanEfiSignatureAndHash(const std::wstring& path, const std::string&
     }
 }
 
-// Parte 3: PCR do TPM 2.0. Monta e submete um TPM2_PCR_Read cru via TBS
-// (TPM_CC_PCR_Read = 0x0000017E), no mesmo padrao ja usado e testado por
-// ReadTpm2PublicArea (scanner_platform.cpp): tag sem sessao (0x8001), sem
-// campo parameterSize na resposta, corpo comecando no offset 10. Le os PCRs
-// 0 (CRTM/BIOS), 2 (option ROM), 4 (boot manager/MBR) e 7 (politica Secure
-// Boot) no banco SHA256. Falha fechada em qualquer anomalia: nunca le fora
-// dos limites do buffer de resposta, nunca reporta valor incerto.
 static bool EhkReadTpm2PcrValues(TBS_HCONTEXT context, const std::vector<uint32_t>& pcrIndices,
                                   std::vector<std::pair<uint32_t, std::array<BYTE, 32>>>& outValues) {
     outValues.clear();
@@ -1215,12 +1067,12 @@ static bool EhkReadTpm2PcrValues(TBS_HCONTEXT context, const std::vector<uint32_
     }
 
     std::vector<BYTE> command;
-    EhkAppendBe16(command, 0x8001);      // tag: TPM_ST_NO_SESSIONS
-    EhkAppendBe32(command, 0);           // commandSize (corrigido abaixo)
-    EhkAppendBe32(command, 0x0000017E);  // TPM_CC_PCR_Read
-    EhkAppendBe32(command, 1);           // TPML_PCR_SELECTION.count = 1 banco
-    EhkAppendBe16(command, 0x000B);      // TPM_ALG_SHA256
-    command.push_back(3);                // sizeofSelect (cobre PCR 0-23)
+    EhkAppendBe16(command, 0x8001);
+    EhkAppendBe32(command, 0);
+    EhkAppendBe32(command, 0x0000017E);
+    EhkAppendBe32(command, 1);
+    EhkAppendBe16(command, 0x000B);
+    command.push_back(3);
     command.push_back(pcrSelect[0]);
     command.push_back(pcrSelect[1]);
     command.push_back(pcrSelect[2]);
@@ -1236,15 +1088,15 @@ static bool EhkReadTpm2PcrValues(TBS_HCONTEXT context, const std::vector<uint32_
     if (result != TBS_SUCCESS || responseSize < 10) return false;
 
     const BYTE* r = response.data();
-    if (EhkReadBe32(r + 6) != 0) return false; // responseCode != TPM_RC_SUCCESS
+    if (EhkReadBe32(r + 6) != 0) return false;
 
     size_t off = 10;
     if (off + 4 > responseSize) return false;
-    off += 4; // pcrUpdateCounter (nao usado)
+    off += 4;
 
     if (off + 4 > responseSize) return false;
     uint32_t selCount = EhkReadBe32(r + off); off += 4;
-    if (selCount != 1) return false; // so pedimos 1 selecao (banco SHA256)
+    if (selCount != 1) return false;
 
     if (off + 2 + 1 > responseSize) return false;
     uint16_t hashAlg = EhkReadBe16(r + off); off += 2;
@@ -1256,14 +1108,14 @@ static bool EhkReadTpm2PcrValues(TBS_HCONTEXT context, const std::vector<uint32_
     memcpy(returnedSelect, r + off, 3);
     off += sizeofSelect;
 
-    // Se o TPM devolveu um subconjunto dos PCRs pedidos (permitido pela
-    // spec), trata como leitura indisponivel em vez de arriscar um baseline
-    // que oscila entre conjunto completo/parcial.
+
+
+
     if (memcmp(returnedSelect, pcrSelect, 3) != 0) return false;
 
-    // A ordem dos digests em pcrValues corresponde a ordem crescente dos bits
-    // marcados em pcrSelectionOut (invariante da especificacao TPM2) - nao
-    // assume a ordem {0,2,4,7} pedida.
+
+
+
     std::vector<uint32_t> expectedIndices;
     for (uint32_t idx = 0; idx < 24; ++idx)
         if (returnedSelect[idx / 8] & (1u << (idx % 8)))
@@ -1288,18 +1140,12 @@ static bool EhkReadTpm2PcrValues(TBS_HCONTEXT context, const std::vector<uint32_
     return !outValues.empty();
 }
 
-// corroboratingEfiSignal = true se algum achado EHKSCAN com severidade HIGH
-// ja foi adicionado a out nesta mesma passada (por ScanEfiSectionHooks/
-// ScanEfiSignatureAndHash, de qualquer .efi). Drift de PCR sozinho e comum
-// por motivos benignos (atualizacao de firmware/BIOS, politica Secure
-// Boot/dbx, atualizacao do boot manager) - so vale HIGH quando corroborado
-// por outro sinal HIGH do mesmo scan; sozinho fica MEDIUM.
 static void ScanTpmPcrBaseline(std::vector<ScannerUI::DeepScanFinding>& out, bool corroboratingEfiSignal) {
     TPM_DEVICE_INFO info = {};
     info.structVersion = 1;
     if (Tbsi_GetDeviceInfo(sizeof(info), &info) != TBS_SUCCESS ||
         info.tpmVersion == TPM_VERSION_UNKNOWN)
-        return; // sem TPM 2.0: nada a verificar, sem finding
+        return;
 
     TBS_CONTEXT_PARAMS2 params = {};
     params.version = TBS_CONTEXT_VERSION_TWO;
@@ -1341,11 +1187,6 @@ static void ScanTpmPcrBaseline(std::vector<ScannerUI::DeepScanFinding>& out, boo
     }
 }
 
-// Descoberta de .efi: reusa CollectEfiSystemPartitionRoots (ja global) para as
-// raizes da ESP, com um walker recursivo pequeno e proprio aqui (nao reusa
-// CollectEfiRoots/CollectEfiFilesRecursive de scanner_files.cpp, que sao
-// static/locais e muito mais elaborados - a sofisticacao de evasao por
-// extensao deles ja e coberta pela pagina EFI Cheat Detect).
 static void EhkCollectEfiFiles(const std::wstring& dir, std::vector<std::wstring>& out, int depth = 0) {
     if (depth > 6 || out.size() >= 64) return;
 
@@ -1411,34 +1252,12 @@ static void ScanEfiHooks(std::vector<ScannerUI::DeepScanFinding>& out) {
         }
     }
 
-    // PCRs sao globais da maquina, nao por arquivo - uma unica chamada.
+
     ScanTpmPcrBaseline(out, anyHighFinding);
 }
 
-// ============================================================================
-// LXAScan — payloads disfarcados em diretorios temporarios. Malware droppers
-// classicamente largam o payload em %TEMP%/C:\Windows\Temp com extensao
-// "de dado" (.dat/.tmp/.bin/etc) e/ou nome puramente numerico para escapar
-// de varreduras ingenuas por extensao. Classificacao por conteudo (header PE
-// + entropia), sem rastreio de mudanca ao longo do tempo: o mecanismo de
-// baseline DPAPI ja usado no EHKScan (CheckProtectedBootBaseline) faz um
-// ciclo completo de abrir+descriptografar o arquivo de baseline a cada
-// chamada, aceitavel para meia duzia de arquivos .efi/PCR mas caro demais
-// para as dezenas de candidatos que o LXAScan pode encontrar em %TEMP% por
-// scan - decisao consciente de escopo, nao um descuido.
-// ============================================================================
-
 namespace {
 
-// Blocklist (nao allowlist) de proposito: uma lista pequena de extensoes
-// "suspeitas" deixaria QUALQUER extensao fora dela (.docx, .csv, .xml, ou
-// qualquer coisa nao prevista) evadir o LXAScan de graca, nao importa o
-// conteudo - exatamente o disfarce por nome/extensao que nao pode funcionar.
-// Em vez disso, bloqueia so um punhado de formatos definitivamente inertes
-// (imagem/fonte/estilo - nunca carregam payload executavel na pratica) e
-// trata TODO O RESTO como candidato; a classificacao por conteudo (header PE
-// + entropia) e quem decide severidade, entao um arquivo genuinamente inerte
-// que virou candidato nao sobe de FLAG por falta de sinal.
 const wchar_t* const kLxaInertExtensions[] = {
     L".JPG", L".JPEG", L".PNG", L".GIF", L".BMP", L".ICO", L".SVG",
     L".WOFF", L".WOFF2", L".TTF", L".CSS", L".MAP",
@@ -1466,7 +1285,7 @@ bool LxaHasKnownDataMagic(const BYTE* data, size_t len) {
     if (len >= 4 && data[0] == 'P' && data[1] == 'K' &&
         ((data[2] == 3 && data[3] == 4) || (data[2] == 5 && data[3] == 6) ||
          (data[2] == 7 && data[3] == 8)))
-        return true; // ZIP/JAR/Office package
+        return true;
     if (len >= 6 && memcmp(data, "7z\xBC\xAF\x27\x1C", 6) == 0) return true;
     if (len >= 4 && memcmp(data, "Rar!", 4) == 0) return true;
     if (len >= 4 && memcmp(data, "MSCF", 4) == 0) return true;
@@ -1483,9 +1302,6 @@ bool LxaIsNumericFilenameStem(const std::wstring& stem) {
     return true;
 }
 
-// MZ + assinatura PE\0\0 no e_lfanew - versao leve do mesmo check ja usado
-// em EhkReadPeSections/AnalyzeEfiPe, sem tabela de secoes (aqui so precisa
-// responder "isso e um executavel disfarcado de dado?").
 bool LxaLooksLikePe(const BYTE* data, size_t len) {
     if (len < 0x40 || data[0] != 'M' || data[1] != 'Z') return false;
     LONG peOff = *reinterpret_cast<const LONG*>(data + 0x3C);
@@ -1493,7 +1309,7 @@ bool LxaLooksLikePe(const BYTE* data, size_t len) {
     return data[peOff] == 'P' && data[peOff + 1] == 'E' && data[peOff + 2] == 0 && data[peOff + 3] == 0;
 }
 
-} // namespace
+}
 
 static void LxaCollectCandidates(const std::wstring& dir, std::vector<std::wstring>& out, int depth = 0) {
     if (depth > 3 || out.size() >= 200) return;
@@ -1518,14 +1334,14 @@ static void LxaCollectCandidates(const std::wstring& dir, std::vector<std::wstri
         size_t dot = name.find_last_of(L'.');
         std::wstring ext = dot == std::wstring::npos ? L"" : ToUpperInvariant(name.substr(dot));
 
-        if (!ext.empty() && LxaIsInertExtension(ext)) continue; // formato definitivamente inerte - nunca candidato
+        if (!ext.empty() && LxaIsInertExtension(ext)) continue;
 
         uint64_t sz = ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
-        if (sz < 64 || sz > 50ull * 1024 * 1024) continue; // muito pequeno (sem conteudo) ou grande demais (cache legitimo)
+        if (sz < 64 || sz > 50ull * 1024 * 1024) continue;
 
-        // So captura arquivo tocado durante a sessao atual (pos-boot) - um
-        // .dat/.tmp/.bin que ja estava em Temp antes desta sessao ligar quase
-        // certamente nao e um payload recem-derrubado.
+
+
+
         if (!IsAfterBoot(data.ftLastWriteTime)) continue;
 
         out.push_back(full);
@@ -1588,13 +1404,13 @@ static void ScanTempDroppedFiles(std::vector<ScannerUI::DeepScanFinding>& out) {
                 severity = "MEDIUM";
                 reason = "PE nao assinado e empacotado criado em diretorio temporario";
             } else {
-                continue; // instalador/updater comum sem evidencia adicional
+                continue;
             }
         } else if (!knownDataFormat && packedLike && numericName) {
             severity = "MEDIUM";
             reason = "nome de arquivo numerico (padrao de dropper) + conteudo de alta entropia (empacotado/cifrado)";
         } else {
-            continue; // nome, local ou entropia isolados nao provam payload
+            continue;
         }
 
         std::string detail = reason +
@@ -1611,26 +1427,6 @@ static void ScanTempDroppedFiles(std::vector<ScannerUI::DeepScanFinding>& out) {
     }
 }
 
-// ============================================================================
-// TRHScan — thread hijacking via contexto de threads suspensas. Diferente do
-// ScanThreadStartAddresses (scanner_processes.cpp), que so olha o ENDERECO DE
-// INICIO de cada thread (propriedade estatica, fixada na criacao), o TRHScan
-// olha o RIP/EIP ATUAL de threads SUSPENSAS - o padrao classico de thread
-// hijacking: em vez de CreateRemoteThread (muito monitorado), o atacante
-// suspende uma thread ja existente, reescreve o contexto via SetThreadContext
-// (RIP apontando pro shellcode) e retoma - ou deixa suspensa como backdoor
-// dormente. Nenhum codigo no projeto ja usa GetThreadContext/SuspendThread/
-// cntSuspendCount - esse sinal e genuinamente novo, nao duplica nada.
-//
-// Sem gate de "processo confiavel": mesma razao do HJCScan - thread hijacking
-// mira processos confiaveis justamente pra se esconder.
-// ============================================================================
-
-// So chega aqui quando o RIP/EIP da thread suspensa cai FORA de qualquer
-// modulo carregado - a esmagadora maioria das threads suspensas (pool de
-// threads, pausa de GC, bloqueada num syscall) tem RIP dentro de ntdll.dll/
-// runtime e nunca chega neste ponto, entao a cascata abaixo ja opera sobre um
-// sinal razoavelmente raro.
 static void ClassifySuspendedThreadRip(HANDLE process, DWORD tid,
                                         const std::string& procName, uintptr_t rip,
                                         std::vector<ScannerUI::DeepScanFinding>& out) {
@@ -1665,7 +1461,7 @@ static void ClassifySuspendedThreadRip(HANDLE process, DWORD tid,
         severity = "MEDIUM";
         reason = "RIP em memoria privada executavel fora de qualquer modulo (perfil de thread hijacking)";
     } else {
-        return; // RIP isolado fora de modulo ocorre em estados transitórios de threads.
+        return;
     }
 
     std::string detail = reason + " | rip=" + HexAddress(rip) +
@@ -1692,15 +1488,15 @@ static void ScanProcessSuspendedThreads(DWORD pid, const std::string& procName, 
 
             MaybePaceIteration(paceCounter, 4);
 
-            // THREADENTRY32 nao carrega contagem de suspensao (o sample original
-            // usava um campo "cntSuspendCount" que nao existe na struct real do
-            // Windows) - a unica forma documentada de consultar isso sem efeito
-            // colateral permanente e o round-trip SuspendThread/ResumeThread ja
-            // usado por ferramentas como Process Explorer/Process Hacker:
-            // SuspendThread incrementa e devolve a contagem ANTERIOR a nossa
-            // chamada; ResumeThread desfaz imediatamente so o nosso incremento,
-            // restaurando o estado original (suspensa continua suspensa, rodando
-            // volta a rodar).
+
+
+
+
+
+
+
+
+
             HANDLE hThread = OpenThread(
                 THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME,
                 FALSE, te32.th32ThreadID);
@@ -1716,9 +1512,9 @@ static void ScanProcessSuspendedThreads(DWORD pid, const std::string& procName, 
             uintptr_t rip = 0;
             bool ok = false;
             if (wasAlreadySuspended) {
-                // A thread esta suspensa agora (seja pela nossa chamada ou porque
-                // ja estava) - GetThreadContext exige a thread suspensa para dado
-                // consistente, entao e seguro ler aqui.
+
+
+
                 if (isWow64) {
                     WOW64_CONTEXT wowCtx = {};
                     wowCtx.ContextFlags = WOW64_CONTEXT_CONTROL;
@@ -1736,12 +1532,12 @@ static void ScanProcessSuspendedThreads(DWORD pid, const std::string& procName, 
                 }
             }
 
-            ResumeThread(hThread); // desfaz so o nosso incremento
+            ResumeThread(hThread);
             CloseHandle(hThread);
 
             if (!wasAlreadySuspended || !ok || rip == 0) continue;
 
-            if (IsAddrInModules(rip, modules)) continue; // suspensa normal, RIP em codigo legitimo
+            if (IsAddrInModules(rip, modules)) continue;
 
             ClassifySuspendedThreadRip(process, te32.th32ThreadID, procName, rip, out);
         } while (Thread32Next(snapshot, &te32));
@@ -1778,7 +1574,7 @@ static void ScanSuspendedThreads(std::vector<ScannerUI::DeepScanFinding>& out) {
             }
 
             BOOL isWow64 = FALSE;
-            IsWow64Process(process, &isWow64); // falha -> trata como processo nativo (caso mais comum)
+            IsWow64Process(process, &isWow64);
 
             std::string procName = WideToUtf8(entry.szExeFile) + " [" + std::to_string(pid) + "]";
             ScanProcessSuspendedThreads(pid, procName, process, modules, isWow64 != FALSE, out);
@@ -1797,8 +1593,8 @@ std::vector<ScannerUI::DeepScanFinding> CollectDeepScanFindings(std::string& sta
     std::vector<ScannerUI::DeepScanFinding> lxaFindings;
     std::vector<ScannerUI::DeepScanFinding> trhFindings;
 
-    // Cada topico recebe seu proprio orcamento durante a coleta. Assim um
-    // processo com muitas regioes RWX nao impede EFI/TPM ou threads de rodar.
+
+
     ScanInjectedPayloads(plFindings);
     ScanDllHijacking(hjcFindings);
     ScanEfiHooks(ehkFindings);

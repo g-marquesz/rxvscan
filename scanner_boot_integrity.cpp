@@ -252,8 +252,8 @@ TcgLogSummary ParseTcgLog(const std::vector<uint8_t>& log) {
         summary.error = "SpecID event is truncated";
         return summary;
     }
-    spec += 4; // platformClass
-    spec += 4; // minor, major, errata, uintnSize
+    spec += 4;
+    spec += 4;
     uint32_t algorithmCount = 0;
     memcpy(&algorithmCount, log.data() + spec, sizeof(algorithmCount));
     spec += sizeof(algorithmCount);
@@ -455,7 +455,7 @@ bool SaveProtectedBaseline(const std::unordered_map<std::string, std::string>& v
     return true;
 }
 
-} // namespace
+}
 
 std::vector<std::wstring> CollectEfiSystemPartitionRoots(std::string& coverageStatus) {
     std::vector<std::wstring> roots;

@@ -141,9 +141,9 @@ static bool GetTpmEndorsementPublicKeyHashFromPowerShell(std::string& hashHex) {
         return false;
     }
 
-    // Kill PowerShell after 5 s so the pipe closes and ReadFile unblocks.
-    // DuplicateHandle gives the thread its own handle so it stays valid after
-    // CloseHandle(pi.hProcess) below.
+
+
+
     HANDLE hKiller = nullptr;
     DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(),
                     &hKiller, PROCESS_TERMINATE | SYNCHRONIZE, FALSE, 0);
@@ -698,9 +698,7 @@ static std::string CollectOsVersion() {
     return WideToUtf8(product + version.str());
 }
 
-// Placa-mae Intel X99 (BaseBoardProduct/SystemProductName) — mesmo par de
-// campos e mesma logica de substring ja usada em scanner_events_services.cpp
-// para explicar a ausencia de TPM 2.0 nativo nessa plataforma.
+
 static bool DetectBoardX99(std::string& boardProduct) {
     const wchar_t* key = L"HARDWARE\\DESCRIPTION\\System\\BIOS";
     const wchar_t* fields[] = { L"BaseBoardProduct", L"SystemProductName", nullptr };
@@ -714,7 +712,7 @@ static bool DetectBoardX99(std::string& boardProduct) {
     return false;
 }
 
-// CPU Xeon (ProcessorNameString do primeiro core logico).
+
 static bool DetectCpuXeon(std::string& cpuName) {
     const wchar_t* key = L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
     std::wstring value = ReadRegString(HKEY_LOCAL_MACHINE, key, L"ProcessorNameString");

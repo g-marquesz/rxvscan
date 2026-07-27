@@ -47,7 +47,6 @@ static bool IsWritableOrWriteExecuteProtection(DWORD protect) {
            base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
-// Tag constants are defined in scanner_core.h under namespace ScanTag.
 static constexpr const char* kTagManualMapping = ScanTag::ManualMapping;
 static constexpr const char* kTagMapper        = ScanTag::Mapper;
 static constexpr const char* kTagMemoryInject  = ScanTag::MemoryInject;
@@ -91,25 +90,25 @@ static bool IsHdPlayerProcess(const std::wstring& exe) {
 
 static bool IsKnownJitHost(const std::wstring& exe) {
     static const std::unordered_set<std::wstring> names = {
-        // Browsers (V8/SpiderMonkey/Chakra JIT)
+
         L"CHROME.EXE", L"FIREFOX.EXE", L"MSEDGE.EXE", L"OPERA.EXE", L"BRAVE.EXE",
         L"VIVALDI.EXE", L"THORIUM.EXE",
-        // JVM-based
+
         L"JAVA.EXE", L"JAVAW.EXE", L"JAVAWS.EXE",
-        // .NET / Mono
+
         L"DOTNET.EXE", L"CSC.EXE", L"VBCSCOMPILER.EXE",
         L"MONO.EXE", L"MONO-SGEN.EXE",
-        // Node / Deno / Bun
+
         L"NODE.EXE", L"DENO.EXE", L"BUN.EXE",
-        // Scripting runtimes
+
         L"POWERSHELL.EXE", L"PWSH.EXE",
         L"RUBY.EXE", L"RUBY23.EXE", L"RUBY24.EXE", L"RUBY25.EXE",
         L"PHP.EXE", L"PHP-CGI.EXE",
         L"PYTHON.EXE", L"PYTHONW.EXE", L"PYTHON3.EXE",
         L"PERL.EXE",
-        // LuaJIT / Lua
+
         L"LUAJIT.EXE", L"LUA.EXE",
-        // Game engines with script JIT
+
         L"UNITY.EXE", L"UNITYHUB.EXE",
     };
     return names.find(ToUpperInvariant(exe)) != names.end();
@@ -342,14 +341,14 @@ static void ScanUnsignedModules(HANDLE process, const std::string& processName,
 
         if (!installDir.empty() && DetectionFilter::PathIsUnder(module.path, DetectionFilter::UpperW(installDir)))
             continue;
-        // Signed module path: trust same-publisher DLLs and the broad set of legitimately
-        // cross-publisher loads (Windows system runtime in System32, OEM drivers,
-        // ProgramFiles app DLLs, UserProfile-installed apps). What still warrants a
-        // finding is a signed-but-foreign-publisher DLL loading from a sketchy path
-        // (Temp/installer staging or unmapped paths) — that is a typical cheat-DLL
-        // delivery vector that previously slipped past the unsigned-only filter.
-        // Signed cheats from System32 paths require admin write and are caught by
-        // CollectGraphicsHookFindings / ScanDxgiVtableIntegrity / ScanNtdllStubIntegrity.
+
+
+
+
+
+
+
+
         if (IsAuthenticodeSigned(module.path)) {
             if (!exePath.empty() && DetectionFilter::SamePublisherTrusted(module.path, exePath))
                 continue;
@@ -359,7 +358,7 @@ static void ScanUnsignedModules(HANDLE process, const std::string& processName,
                 mcls != DetectionFilter::PathClass::Unmapped)
                 continue;
             std::wstring modCn = DetectionFilter::GetSignerCommonNameUpperCached(module.path);
-            // Microsoft-signed runtime support DLLs dropped via installer are routine.
+
             if (modCn.compare(0, 9, L"MICROSOFT") == 0)
                 continue;
             std::string detail = "DLL assinada por publisher estranho carregada de local nao-confiavel: " +
@@ -374,17 +373,17 @@ static void ScanUnsignedModules(HANDLE process, const std::string& processName,
         bool packed = entropy >= DetectionFilter::kPackedEntropy;
         DetectionFilter::PathClass cls = DetectionFilter::ClassifyPath(module.path);
 
-        // Unsigned & not catalog-signed inside System32/Program Files is unusual (genuine
-        // Windows/vendor DLLs are always signed or cataloged), but low-entropy/unpacked
-        // third-party DLLs do exist there. Surface at low severity instead of dropping —
-        // a malicious DLL placed here with admin rights must not vanish from the report.
+
+
+
+
         if (DetectionFilter::IsTrustedDir(cls) && !packed) {
-            // Catalog fallback: WinVerifyTrust above can fail transiently (slow catalog
-            // warm-up, locked cat files, etc.) on legitimate System32 DLLs that are only
-            // catalog-signed (OPENGL32.dll, GLU32.dll, etc.). If CryptCATAdmin reports
-            // the file's hash IS in an installed catalog, the file is MS-shipped — do
-            // not flag. Only NotFound (catalog system worked, hash absent) is suspicious.
-            // Unverifiable (cat service failed) is not treated as evidence either way.
+
+
+
+
+
+
             if (DetectionFilter::QueryWindowsCatalogState(module.path) ==
                 DetectionFilter::CatalogState::Found)
                 continue;
@@ -396,8 +395,8 @@ static void ScanUnsignedModules(HANDLE process, const std::string& processName,
             continue;
         }
 
-        // Only flag unsigned DLLs if they are packed OR come from a clearly suspicious path.
-        // UserProfile and ProgramFiles can have legitimate unsigned DLLs (game engines, etc.).
+
+
         bool suspiciousPath = cls == DetectionFilter::PathClass::TempOrInstaller ||
                               cls == DetectionFilter::PathClass::Unknown ||
                               cls == DetectionFilter::PathClass::Unmapped;
@@ -460,13 +459,13 @@ static void ScanExecutablePrivateMemory(HANDLE process, const std::string& proce
                                         bool reportManualMap = true,
                                         bool useWinScanTags = false,
                                         const std::unordered_set<uintptr_t>* gfxHookDests = nullptr) {
-    // Compute upper address bound: highest module end + 512 MB, minimum 2 GB.
-    // This avoids iterating terabytes of reserved-but-uncommitted address space.
+
+
     uintptr_t maxModuleEnd = 0;
     for (const auto& m : modules)
         if (m.end > maxModuleEnd) maxModuleEnd = m.end;
-    constexpr uintptr_t kMinScan   = 2ULL * 1024 * 1024 * 1024;       // 2 GB floor
-    constexpr uintptr_t kHeadroom  = 512ULL * 1024 * 1024;             // 512 MB above modules
+    constexpr uintptr_t kMinScan   = 2ULL * 1024 * 1024 * 1024;
+    constexpr uintptr_t kHeadroom  = 512ULL * 1024 * 1024;
     const uintptr_t kScanLimit = (maxModuleEnd + kHeadroom > kMinScan)
                                  ? (maxModuleEnd + kHeadroom) : kMinScan;
 
@@ -531,11 +530,11 @@ static void ScanExecutablePrivateMemory(HANDLE process, const std::string& proce
                 std::string sev = (isGfxPayload && v.severity != "HIGH") ? "HIGH" : v.severity;
                 AddEmulatorFinding(out, processName, tag, base, detail, sev);
             } else if (!v.keep && useWinScanTags && privateMem && mbi.RegionSize >= 256) {
-                // Mudanca 6: regions discarded by ClassifyExecRegion may still be shellcode.
-                // Read up to 4 KB and check for definitive shellcode byte patterns:
-                //   hasPebDebugCheck = mov rax/rbx, gs:[60h] — PEB walking (loader-free shellcode)
-                //   hasRdtscCheck + hasCpuidVmCheck = timing+VM evasion (common in loaders)
-                // These sequences are extremely rare in legitimate JIT/managed-runtime output.
+
+
+
+
+
                 BYTE sc[4096]; SIZE_T scGot = 0;
                 SIZE_T toRead = mbi.RegionSize < sizeof(sc) ? mbi.RegionSize : sizeof(sc);
                 if (ReadProcessMemory(process, mbi.BaseAddress, sc, toRead, &scGot) && scGot >= 16) {
@@ -631,7 +630,7 @@ static void ScanThreadStartAddresses(DWORD pid, const std::string& processName, 
                         }
                     }
                     if (!suppress) {
-                        // Only report threads with conclusive indicators to avoid noise.
+
                         bool hasRwx = IsWriteExecuteProtection(mbi.Protect);
                         bool conclusive = hasPeHeader || forceEmulatorThreadReport || hasRwx;
                         if (!conclusive)
@@ -672,10 +671,7 @@ static void ScanThreadStartAddresses(DWORD pid, const std::string& processName, 
     CloseHandle(snapshot);
 }
 
-// ─── Mudanca 4: PE structural anomaly scan for loaded modules ─────────────────
-// Detects binary patching (checksum mismatch), packer sections, and missing Rich
-// headers without relying on module name, path, or file size.
-// Trust gate: IsTrustedSignedCached only — signature is the only reliable signal.
+
 struct ExpectedMsysRuntimeProfile {
     bool valid = false;
     DWORD autoloadRva = 0;
@@ -806,13 +802,13 @@ static ExpectedMsysRuntimeProfile AnalyzeExpectedMsysRuntime(const std::wstring&
     return profile;
 }
 
-static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& processName,
+static void ScanLoadedModuleAnomalies(HANDLE , const std::string& processName,
                                       const std::vector<ModuleRange>& modules,
                                       std::vector<ScannerUI::EmulatorFinding>& out) {
     for (const auto& mod : modules) {
         if (mod.path.empty())
             continue;
-        // Skip cryptographically verified modules — content integrity is confirmed.
+
         if (DetectionFilter::IsTrustedSignedCached(mod.path))
             continue;
 
@@ -823,17 +819,17 @@ static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& pro
 
         std::string modName = WideToUtf8(BaseNameFromPath(mod.path));
 
-        // ── 1. Checksum mismatch: binary was patched after compilation ─────────
+
         if (DetectionFilter::CheckPeChecksumMismatch(mod.path, pe.storedChecksum)) {
             std::string detail = "Modulo com checksum PE diferente do disco: " + modName +
                                  " | checksum armazenado != calculado | indicador de patching binario";
             if (out.size() < ScanLimits::kMaxSysmemFindings)
                 out.push_back({ processName, kTagModulePatch,
                                 HexAddress(mod.begin), detail, "HIGH" });
-            continue; // one finding per module is enough
+            continue;
         }
 
-        // ── 2. Packer sections: .vmp, .themida, packed, etc. ──────────────────
+
         if (pe.badSections && !msysProfile.valid) {
             std::string detail = "Modulo com secoes de packer/protecao: " + modName +
                                  " | secoes anomalas detectadas (obfuscator/packer)";
@@ -844,12 +840,7 @@ static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& pro
     }
 }
 
-// Fetched at most once per scan run (see ResetSystemHandleSnapshot, called from
-// RunScannerAsync) and reused by every consumer that used to re-query the whole
-// system handle table on its own: ScanSuspiciousHandlesInProcess below, the DKOM
-// cross-check further down, and CollectHdPlayerExternalHandles in
-// scanner_generic_bypass.cpp. Nothing that used to be checked stops being
-// checked — the OS is just asked for the table once instead of N times.
+
 static SystemHandleSnapshot g_systemHandleSnapshot;
 static bool g_systemHandleSnapshotFetched = false;
 
@@ -861,7 +852,7 @@ void ResetSystemHandleSnapshot() {
 const SystemHandleSnapshot& GetSystemHandleSnapshot() {
     if (g_systemHandleSnapshotFetched)
         return g_systemHandleSnapshot;
-    g_systemHandleSnapshotFetched = true; // don't retry a failed fetch mid-scan
+    g_systemHandleSnapshotFetched = true;
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto querySystem = ntdll ? reinterpret_cast<NtQuerySystemInformationFn>(
@@ -886,9 +877,7 @@ const SystemHandleSnapshot& GetSystemHandleSnapshot() {
     return g_systemHandleSnapshot;
 }
 
-// ─── Mudanca 5: Intra-process injection handle scan ───────────────────────────
-// Enumerates handles owned by 'pid' and reports only the injection-capable ones
-// whose resolved target is exactly HD-Player.exe.
+
 static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procName,
                                            std::vector<ScannerUI::EmulatorFinding>& out) {
     constexpr DWORD kInjectCombo = PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION;
@@ -897,7 +886,7 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
     if (!snapshot.ok)
         return;
 
-    // Open the target process so we can DuplicateHandle its handles.
+
     HANDLE targetProc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
     if (!targetProc)
         return;
@@ -911,11 +900,11 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
         const auto& h = info->Handles[i];
         if ((DWORD)h.UniqueProcessId != pid)
             continue;
-        // Must have BOTH write AND create-thread to qualify as injection combo.
+
         if ((h.GrantedAccess & kInjectCombo) != kInjectCombo)
             continue;
 
-        // Duplicate the handle into our process to resolve the target PID.
+
         HANDLE dup = nullptr;
         if (!DuplicateHandle(targetProc, (HANDLE)(ULONG_PTR)h.HandleValue,
                              GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
@@ -924,14 +913,14 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
         CloseHandle(dup);
 
         if (targetPid == 0 || targetPid == pid)
-            continue; // skip null or self-handle
+            continue;
 
-        // This rule only reports handles whose resolved target is HD-Player.exe.
+
         std::wstring targetPath = ProcessFullPathW(targetPid);
         if (targetPath.empty() || !IsHdPlayerProcess(BaseNameFromPath(targetPath)))
             continue;
 
-        // Deduplicate by (targetPid, access) to avoid flood from multi-handle injectors.
+
         std::string key = std::to_string(targetPid) + ":" +
                           std::to_string(h.GrantedAccess);
         if (!seen.insert(key).second)
@@ -960,15 +949,15 @@ static void ScanAnomalousModuleProtections(HANDLE process, const std::string& pr
     for (const auto& mod : modules) {
         if (mod.path.empty())
             continue;
-        // Mudanca 3: removido IsTrustedDir — localizacao nao e criterio de confianca.
-        // Um cheat pode colocar uma DLL em System32 com privilegio admin. Apenas assinatura
-        // valida (conteudo criptograficamente verificado) e aceita como confianca.
+
+
+
         if (DetectionFilter::IsTrustedSignedCached(mod.path))
             continue;
 
-        // Determine if this module is graphics-related (content-based, not name-based).
-        // RWX in a non-graphics, non-suspect module is downgraded to MEDIUM to avoid
-        // false positives from game engines and other unsigned-but-legitimate modules.
+
+
+
         BYTE modHdr[4096] = {}; SIZE_T mhg = 0;
         ReadProcessMemory(process, (LPCVOID)mod.begin, modHdr, sizeof(modHdr), &mhg);
         bool isGfxModule = DetectionFilter::ExportsGraphicsSymbol(modHdr, mhg, mod.begin);
@@ -996,8 +985,8 @@ static void ScanAnomalousModuleProtections(HANDLE process, const std::string& pr
                 }
                 uintptr_t allocBase = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
                 bool isGfxHookTarget = gfxHookDests && allocBase && gfxHookDests->count(allocBase) > 0;
-                // HIGH only when the module is graphics-related or is a confirmed hook destination.
-                // Otherwise downgrade to MEDIUM (suspicious but not conclusive).
+
+
                 std::string sev = (isGfxModule || isGfxHookTarget) ? "HIGH" : "MEDIUM";
                 std::string detail = "RWX em codigo de modulo: " + WideToUtf8(file) +
                                      " | protect=" + ProtectionToString(mbi.Protect) +
@@ -1017,10 +1006,7 @@ static void ScanAnomalousModuleProtections(HANDLE process, const std::string& pr
     }
 }
 
-// ─── Hidden DLL detection: PEB module list vs VAD cross-reference ────────────
-// Finds MEM_IMAGE regions that are not listed in the PEB InLoadOrderModuleList.
-// Manual mappers unlink injected DLLs from the PEB to hide them from module
-// enumeration APIs — this detects the remaining mapped image regions.
+
 static bool QueryMappedImagePath(HANDLE process, PVOID address, std::wstring& path) {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto NtQueryVirtMem = ntdll ? reinterpret_cast<NtQueryVirtualMemoryFn>(
@@ -1055,7 +1041,7 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
                                   const std::vector<ModuleRange>& modules,
                                   std::vector<ScannerUI::EmulatorFinding>& out,
                                   const std::unordered_set<uintptr_t>* activeThreadBases = nullptr) {
-    // Build lookup sets from the known module list
+
     std::unordered_set<uintptr_t> knownBases;
     std::unordered_set<std::wstring> knownPaths;
     for (const auto& m : modules) {
@@ -1085,12 +1071,12 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
         const bool hasPeHeader = DetectionFilter::HasPEHeader(process, mbi.AllocationBase);
         const bool hasActiveThread = activeThreadBases && activeThreadBases->count(allocBase) > 0;
         const bool writeExec = IsWriteExecuteProtection(mbi.Protect);
-        if (knownBases.count(allocBase)) continue; // visible in PEB → legitimate
+        if (knownBases.count(allocBase)) continue;
 
-        // Query the mapped filename via NtQueryVirtualMemory class 2 (MemoryMappedFilenameInformation)
+
         std::wstring dosPath;
         if (!QueryMappedImagePath(process, mbi.AllocationBase, dosPath)) {
-            // Can't get filename — still flag anonymous MEM_IMAGE (very suspicious)
+
             if (!hasPeHeader || (!hasActiveThread && !writeExec))
                 continue;
             std::string detail = "MEM_IMAGE executavel fora da lista de modulos, sem backing resolvido"
@@ -1101,11 +1087,11 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
             continue;
         }
 
-        // UNICODE_STRING layout on x64: USHORT Length(0), MaxLen(2), padding(4), PWSTR Buffer(8)
-        // The Buffer pointer points into our own nameBuf (kernel fills it in).
+
+
         std::wstring dosUp = ToUpperInvariant(dosPath);
 
-        if (knownPaths.count(dosUp)) continue; // same file, different mapping base — skip
+        if (knownPaths.count(dosUp)) continue;
 
         const bool backingExists = FileExistsW(dosPath);
         const bool trustedBacking = backingExists &&
@@ -1135,11 +1121,7 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
     }
 }
 
-// ─── Working Set private executable page analysis ────────────────────────────
-// Uses QueryWorkingSetEx to identify pages that are genuinely private (not COW)
-// and executable. Private executable pages with PE headers = manual-mapped DLLs
-// that changed their protection after loading (e.g. stripped PE header but left
-// RX executable sections).
+
 static void ScanProcessImageBacking(HANDLE process, const std::string& procName,
                                     const std::wstring& executablePath,
                                     const std::vector<ModuleRange>& modules,
@@ -1189,7 +1171,7 @@ static void ScanProcessImageBacking(HANDLE process, const std::string& procName,
 static void ScanPrivateExecutableWorkingSet(HANDLE process, const std::string& procName,
                                              const std::vector<ModuleRange>& modules,
                                              std::vector<ScannerUI::EmulatorFinding>& out) {
-    // Collect candidate page addresses from private executable regions
+
     struct WSExEntry { PVOID VirtualAddress; ULONG_PTR VirtualAttributes; };
 
     std::vector<WSExEntry> entries;
@@ -1219,24 +1201,24 @@ static void ScanPrivateExecutableWorkingSet(HANDLE process, const std::string& p
 
     if (entries.empty()) return;
 
-    // Call QueryWorkingSetEx to get physical page attributes
+
     if (!QueryWorkingSetEx(process, entries.data(), (DWORD)(entries.size() * sizeof(WSExEntry))))
         return;
 
     std::unordered_set<uintptr_t> reported;
     for (const auto& e : entries) {
-        // VirtualAttributes bit 0 = Valid (physically present in working set)
+
         bool valid = (e.VirtualAttributes & 1) != 0;
-        if (!valid) continue; // page swapped out — skip
+        if (!valid) continue;
 
         uintptr_t pageBase = (uintptr_t)e.VirtualAddress;
-        // Deduplicate by allocation base
+
         MEMORY_BASIC_INFORMATION mbi2 = {};
         if (VirtualQueryEx(process, e.VirtualAddress, &mbi2, sizeof(mbi2)) != sizeof(mbi2)) continue;
         uintptr_t allocBase = (uintptr_t)mbi2.AllocationBase;
         if (!reported.insert(allocBase).second) continue;
 
-        // Check for PE header in this truly private executable page
+
         if (DetectionFilter::HasPEHeader(process, e.VirtualAddress)) {
             std::string detail = "Working set: pagina executavel privada com PE header | addr=" +
                                  HexAddress(pageBase) + " | alloc=" + HexAddress(allocBase) +
@@ -1246,10 +1228,7 @@ static void ScanPrivateExecutableWorkingSet(HANDLE process, const std::string& p
     }
 }
 
-// ─── NtGetNextThread: enumerate ALL threads including DKOM-hidden ones ────────
-// Supplements the existing Toolhelp-based thread scan. NtGetNextThread walks the
-// kernel thread list directly, revealing threads hidden from Toolhelp by DKOM.
-// Also follows JMP chains from thread start addresses to detect trampolines.
+
 struct HiddenThreadCandidate {
     DWORD tid = 0;
     uintptr_t start = 0;
@@ -1290,7 +1269,7 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
         GetProcAddress(ntdll, "NtQueryInformationThread")) : nullptr;
     if (!NtGetNextThread || !queryThread) return;
 
-    // Collect Toolhelp TIDs for DKOM comparison (first snapshot)
+
     std::unordered_set<DWORD> toolhelpTids;
     if (!CollectToolhelpThreadIdsForPid(pid, toolhelpTids))
         return;
@@ -1299,9 +1278,9 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
     HANDLE nextThread = nullptr;
     constexpr DWORD kThreadAccess = THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT;
 
-    // Collect DKOM suspects during traversal without flagging immediately.
-    // A thread created between the Toolhelp snapshot and the NtGetNextThread walk
-    // would appear missing from Toolhelp due to timing — not actual DKOM hiding.
+
+
+
     std::unordered_map<DWORD, HiddenThreadCandidate> suspectDkomThreads;
 
     while (NtGetNextThread(process, prevThread, kThreadAccess, 0, 0, &nextThread) >= 0) {
@@ -1310,7 +1289,7 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
 
         DWORD tid = GetThreadId(nextThread);
 
-        // DKOM check: collect suspects; confirmation happens after the loop
+
         HiddenThreadCandidate* dkomCandidate = nullptr;
         if (tid && !toolhelpTids.count(tid)) {
             HiddenThreadCandidate& candidate = suspectDkomThreads[tid];
@@ -1318,7 +1297,7 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
             dkomCandidate = &candidate;
         }
 
-        // Get start address
+
         PVOID startAddr = nullptr;
         if (queryThread(nextThread, 9, &startAddr, sizeof(startAddr), nullptr) < 0 || !startAddr)
             continue;
@@ -1329,17 +1308,17 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
             dkomCandidate->hasStart = true;
         }
         if (AddressInsideModule(start, modules)) {
-            // Start is inside a module — follow JMP chain to detect trampolines
+
             BYTE prolog[16] = {}; SIZE_T pg = 0;
             if (!ReadProcessMemory(process, (LPCVOID)start, prolog, sizeof(prolog), &pg) || pg < 5)
                 continue;
-            // Quick JMP detection
+
             bool hasJmp = (prolog[0] == 0xE9 || (prolog[0] == 0xFF && prolog[1] == 0x25) ||
                            (prolog[0] == 0x48 && prolog[1] == 0xB8 && pg >= 12 &&
                             prolog[10] == 0xFF && prolog[11] == 0xE0));
             if (!hasJmp) continue;
 
-            // Follow up to 5 hops
+
             uintptr_t chainEnd = start;
             for (int hop = 0; hop < 5; ++hop) {
                 BYTE buf[16] = {}; SIZE_T g = 0;
@@ -1359,8 +1338,8 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
             }
 
             if (!AddressInsideModule(chainEnd, modules) && out.size() < ScanLimits::kMaxSysmemFindings) {
-                // Validate destination memory before flagging — AV/security hooks legitimately
-                // redirect trampolines into other signed modules or known stubs.
+
+
                 MEMORY_BASIC_INFORMATION mbiDst = {};
                 if (VirtualQueryEx(process, (LPCVOID)chainEnd, &mbiDst, sizeof(mbiDst)) == sizeof(mbiDst)) {
                     bool dstPrivate  = (mbiDst.Type == MEM_PRIVATE);
@@ -1399,9 +1378,9 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
                 }
             }
         } else {
-            // Start address outside all known modules — apply the same memory-characteristic
-            // analysis used by the Toolhelp scan to avoid flagging JIT engine threads (ART,
-            // V8, .NET CLR) that legitimately start in anonymous private memory.
+
+
+
             if (out.size() >= ScanLimits::kMaxSysmemFindings) continue;
             MEMORY_BASIC_INFORMATION mbi = {};
             if (VirtualQueryEx(process, (LPCVOID)start, &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
@@ -1411,7 +1390,7 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
             double entropy   = DetectionFilter::ProcessRegionEntropy(
                 process, mbi.BaseAddress, (size_t)mbi.RegionSize);
 
-            // Mapped memory without a PE header is a file mapping or data region — not suspicious
+
             if (!privateMem && !hasPeHeader) continue;
 
             DetectionFilter::RegionVerdict v = DetectionFilter::ClassifyExecRegion(
@@ -1442,9 +1421,9 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
     }
     if (prevThread) CloseHandle(prevThread);
 
-    // DKOM double-confirmation: retake Toolhelp snapshot after the traversal.
-    // Only flag threads absent from BOTH snapshots — eliminates timing-based false positives
-    // where a thread was created between the first snapshot and the NtGetNextThread walk.
+
+
+
     if (!suspectDkomThreads.empty()) {
         std::unordered_set<DWORD> confirmTids1;
         std::unordered_set<DWORD> confirmTids2;
@@ -1459,8 +1438,8 @@ static void ScanHiddenThreadsViaKernel(DWORD pid, const std::string& procName, H
             if (confirmTids1.count(candidate.tid) || confirmTids2.count(candidate.tid))
                 continue;
 
-            // Emulator runtimes create and retire many worker/JIT threads. A Toolhelp/NtGetNextThread
-            // mismatch alone is too weak, so require malicious thread-start evidence as well.
+
+
             if (isEmulatorProcess && !candidate.suspiciousStart)
                 continue;
 
@@ -1533,10 +1512,10 @@ static std::string FormatHandleDuration(ULONGLONG ticks100ns) {
 }
 
 static bool IsHdPlayerHandleContext(const std::wstring& objectName) {
-    // Security 4656/4658 reports ProcessName as the caller/owner of the
-    // handle, not as the target object.  Treating HD-PLAYER.EXE here as the
-    // target caused normal handles created by the emulator to be reported.
-    // The object name must identify HD-Player explicitly.
+
+
+
+
     std::wstring objectUpper = ToUpperInvariant(objectName);
     return objectUpper.find(L"HD-PLAYER.EXE") != std::wstring::npos ||
            objectUpper.find(L"HD-PLAYER") != std::wstring::npos;
@@ -1707,8 +1686,8 @@ static void CollectEmulatorHandleLifetimeFindings(std::vector<ScannerUI::Emulato
                 if (objectType.empty()) objectType = "-";
                 if (access.empty()) access = "-";
 
-                // One alert per source/type/access keeps repeated audit entries
-                // from flooding the UI while preserving the first handle as evidence.
+
+
                 const std::string signature = source + "|" + objectType + "|" + access;
                 if (!reportedSignature.insert(signature).second) {
                     openHandles.erase(it);
@@ -1842,20 +1821,20 @@ std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings() {
         std::string name = ProcessName(process);
         std::string nameWithPid = name + " [" + std::to_string(pid) + "]";
         std::wstring installDir = ProcessImageDirW(process);
-        // Process names from ProcessName() are ASCII-safe — direct copy is valid here.
+
         std::wstring nameW(name.begin(), name.end());
         std::wstring exePathW = ProcessFullPathW(pid);
-        // Process-name match alone is not a trust signal — a malicious process can be
-        // renamed to a known emulator runtime to relax RWX/JIT heuristics. Only treat
-        // it as an emulator runtime when the executable is also signed and trusted-dir.
+
+
+
         bool isEmuRuntime = DetectionFilter::IsKnownEmulatorRuntime(nameW) &&
                             DetectionFilter::IsTrustedSignedCached(exePathW) &&
                             DetectionFilter::IsTrustedDir(DetectionFilter::ClassifyPath(exePathW));
         std::vector<ModuleRange> modules;
         if (CollectProcessModules(process, modules)) {
             auto threadBases = CollectThreadAllocBases(pid, process, modules);
-            // Collect graphics hook destinations first — used to tag injected threads/memory
-            // as confirmed OpenGL/gfx chams rather than generic injection.
+
+
             auto gfxDests = CollectGfxHookDestBases(process, modules);
             const std::unordered_set<uintptr_t>* pGfxDests = gfxDests.empty() ? nullptr : &gfxDests;
 
@@ -1866,7 +1845,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings() {
                                      isEmuRuntime, true, true, pGfxDests);
             if (IsHdPlayerProcess(nameW))
                 ScanHdPlayerLowWritableRange(process, nameWithPid, findings);
-            // Advanced detections (only for emulator PIDs — expensive)
+
             ScanHiddenMappedDlls(process, nameWithPid, modules, findings, &threadBases);
             ScanPrivateExecutableWorkingSet(process, nameWithPid, modules, findings);
             ScanAnomalousModuleProtections(process, nameWithPid, modules, findings, pGfxDests);
@@ -1901,24 +1880,15 @@ std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings() {
     return merged;
 }
 
-// P7 — Direct syscall stub pattern matching.
-// Detects structured syscall stubs from multiple evasion frameworks rather than
-// bare 0x0F 0x05 bytes — eliminates false positives from JIT/data.
-//
-// Pattern A  (SysWhispers2/3 canonical):  4C 8B D1  B8 <ssn_lo> <ssn_hi> 00 00  0F 05  C3
-// Pattern B  (simple/SW1 style):                    B8 <ssn_lo> <ssn_hi> 00 00  0F 05  C3
-// Pattern C  (HellsGate/FreshyCalls):    49 89 CA  B8 <ssn_lo> <ssn_hi> 00 00  0F 05  C3
-// Pattern D  (SW1 32-bit style):          B8 <ssn_lo> <ssn_hi> 00 00  BA 08 03 FE 7F  0F 05  C3
-// Pattern E  (Tartarus Gate jmp-over):   E9 ?? ?? ?? ?? [4C 8B D1 within 32 bytes ahead]
-//            Detects the jump trampoline that skips a hooked ntdll stub.
+
 
 struct SyscallStubResult {
     int totalStubs   = 0;
-    int classicStubs = 0;  // Pattern A: SysWhispers2/3
-    int simpleStubs  = 0;  // Pattern B: minimal stub
-    int hellsGate    = 0;  // Pattern C: HellsGate mov r9
-    int sw1Stubs     = 0;  // Pattern D: SysWhispers1 32-bit style
-    int tartarusGate = 0;  // Pattern E: jmp-over trampoline
+    int classicStubs = 0;
+    int simpleStubs  = 0;
+    int hellsGate    = 0;
+    int sw1Stubs     = 0;
+    int tartarusGate = 0;
 };
 
 static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
@@ -1927,7 +1897,7 @@ static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
     if (sz < 8) return r;
 
     for (size_t i = 0; i + 7 < sz; ++i) {
-        // Pattern A: 4C 8B D1  B8 ?? ?? 00 00  0F 05  C3  (11 bytes, SysWhispers2/3)
+
         if (i + 10 < sz
             && buf[i+0] == 0x4C && buf[i+1] == 0x8B && buf[i+2] == 0xD1
             && buf[i+3] == 0xB8
@@ -1940,7 +1910,7 @@ static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
             i += 10;
             continue;
         }
-        // Pattern C: 49 89 CA  B8 ?? ?? 00 00  0F 05  C3  (11 bytes, HellsGate / FreshyCalls)
+
         if (i + 10 < sz
             && buf[i+0] == 0x49 && buf[i+1] == 0x89 && buf[i+2] == 0xCA
             && buf[i+3] == 0xB8
@@ -1953,7 +1923,7 @@ static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
             i += 10;
             continue;
         }
-        // Pattern D: B8 ?? ?? 00 00  BA 08 03 FE 7F  0F 05  C3  (13 bytes, SysWhispers1)
+
         if (i + 12 < sz
             && buf[i+0] == 0xB8
             && buf[i+3] == 0x00 && buf[i+4] == 0x00
@@ -1967,7 +1937,7 @@ static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
             i += 12;
             continue;
         }
-        // Pattern B: B8 ?? ?? 00 00  0F 05  C3  (8 bytes, simple)
+
         if (i + 7 < sz
             && buf[i+0] == 0xB8
             && buf[i+3] == 0x00 && buf[i+4] == 0x00
@@ -1979,7 +1949,7 @@ static SyscallStubResult CountSyscallStubs(const uint8_t* buf, size_t sz)
             i += 7;
             continue;
         }
-        // Pattern E: E9 ?? ?? ?? ??  ... 4C 8B D1 within 32 bytes  (Tartarus Gate jmp-over)
+
         if (i + 36 < sz && buf[i] == 0xE9) {
             bool found = false;
             for (size_t j = i + 5; j + 2 < sz && j < i + 37; ++j) {
@@ -2003,7 +1973,7 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
                                 const std::vector<ModuleRange>& modules,
                                 std::vector<ScannerUI::EmulatorFinding>& out)
 {
-    // Find ntdll VA range — exclude its own stubs from detection
+
     uintptr_t ntdllBegin = 0, ntdllEnd = 0;
     for (const auto& m : modules) {
         if (ToUpperInvariant(BaseNameFromPath(m.path)) == L"NTDLL.DLL") {
@@ -2013,7 +1983,7 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
         }
     }
 
-    // Compute upper scan bound (same strategy as ScanExecutablePrivateMemory)
+
     uintptr_t maxModEnd = 0;
     for (const auto& m : modules)
         if (m.end > maxModEnd) maxModEnd = m.end;
@@ -2043,7 +2013,7 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
         if (ntdllBegin && base >= ntdllBegin && base < ntdllEnd) continue;
         if (AddressInsideModule(base, modules)) continue;
 
-        // Deduplicate by AllocationBase — one report per allocation
+
         uintptr_t allocBase = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
         if (!seenAllocBases.insert(allocBase).second) continue;
 
@@ -2057,14 +2027,14 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
 
         bool isRwx = IsWriteExecuteProtection(mbi.Protect);
 
-        // Severity logic:
-        // - Pattern A/C/D (SW2/HellsGate/SW1) = HIGH always
-        // - Pattern E (TartarusGate) alone without RWX = MEDIUM: 0xE9 + 4C 8B D1 can
-        //   appear in legitimate x64 code (profilers, debugger trampolines, VS tooling)
-        // - TartarusGate + RWX, or mixed with other patterns = HIGH
-        // - 2+ stubs of any kind = HIGH (syscall dispatch table)
-        // - 1 simple stub in RWX = HIGH (runtime-generated stub)
-        // - 1 simple stub in RX = MEDIUM
+
+
+
+
+
+
+
+
         bool onlyTartarus = stubs.tartarusGate > 0
                          && stubs.classicStubs == 0
                          && stubs.hellsGate == 0
@@ -2083,7 +2053,7 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
         else
             severity = "MEDIUM";
 
-        // Build pattern description
+
         std::string patternDesc;
         if (stubs.classicStubs > 0)  patternDesc += "SW2/3 ";
         if (stubs.hellsGate > 0)     patternDesc += "HellsGate ";
@@ -2114,9 +2084,7 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
     }
 }
 
-// Scan private executable memory regions for plaintext strings that appear in injected
-// DLLs: reflective loader export names, .NET namespace metadata, shellcode markers, etc.
-// Only private regions outside loaded modules are checked, so false positives are minimal.
+
 static void ScanSuspiciousStringsInMemory(
     HANDLE process, const std::string& procName,
     const std::vector<ModuleRange>& modules,
@@ -2124,16 +2092,16 @@ static void ScanSuspiciousStringsInMemory(
 {
     struct Token { const char* str; const char* sev; };
     static const Token kTokens[] = {
-        // HIGH — essentially impossible in legitimate private executable memory
-        { "reflectiveloader",     "HIGH" },  // export name from reflective DLL injection framework
-        { "system.windows.forms", "HIGH" },  // .NET managed assembly metadata (injected managed DLL)
-        { "system.reflection",    "HIGH" },  // .NET in-memory assembly loading namespace
-        { "shellcode",            "HIGH" },  // literal string in shellcode payloads/loaders
-        // HIGH — highly specific to injection tooling
-        { "dllinjection",         "HIGH" },  // class/namespace name in injection tools
-        { "injectdll",            "HIGH" },  // function name pattern in DLL loaders
-        { "reflective",           "HIGH" },  // component name in reflective loaders
-        { "manualmap",            "HIGH" },  // manual mapper string in PE loaders
+
+        { "reflectiveloader",     "HIGH" },
+        { "system.windows.forms", "HIGH" },
+        { "system.reflection",    "HIGH" },
+        { "shellcode",            "HIGH" },
+
+        { "dllinjection",         "HIGH" },
+        { "injectdll",            "HIGH" },
+        { "reflective",           "HIGH" },
+        { "manualmap",            "HIGH" },
         { nullptr, nullptr }
     };
 
@@ -2172,8 +2140,8 @@ static void ScanSuspiciousStringsInMemory(
         if (!ReadProcessMemory(process, mbi.BaseAddress, buf.data(), toRead, &got) || got < 16)
             continue;
 
-        // Extract printable ASCII strings (>= 8 chars) and match against token list.
-        // One finding per AllocationBase — goto breaks out on first match.
+
+
         std::string cur;
         cur.reserve(128);
         for (SIZE_T i = 0; i < got; ++i) {
@@ -2204,10 +2172,7 @@ static void ScanSuspiciousStringsInMemory(
     }
 }
 
-// Defined further below (after HasSuspiciousProcessToken/IsKnownDeveloperToolProcess/
-// IsBenignUserLaunchPath, which it depends on). Evaluates the same process-name and
-// temp/user-profile-unsigned-packed heuristics that used to live in the now-removed,
-// separately-enumerating CollectSuspiciousProcesses pass.
+
 static void EvaluateSuspiciousProcessHeuristics(DWORD pid, const std::wstring& rawExeName,
                                                 const std::wstring& fullPath, bool signedOk,
                                                 DetectionFilter::PathClass cls,
@@ -2234,15 +2199,15 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
             DWORD pid = entry.th32ProcessID;
             if (pid == 0 || pid == 4 || pid == ownPid)
                 continue;
-            // Removido: IsKnownJitHost skip. Processos JIT (Chrome, Java, Node, .NET, etc.)
-            // sao alvos comuns de injecao — o ClassifyExecRegion ainda descarta regioes JIT
-            // legitimas por conteudo (entropia + tamanho), nao por nome de processo.
 
-            // Computed unconditionally (not gated on OpenProcess below) so a process that
-            // can't be opened with PROCESS_VM_READ (protected/PPL processes, or one that
-            // exited mid-scan) still gets the lightweight suspicious-process heuristics —
-            // matching what the old, separately-enumerating CollectSuspiciousProcesses
-            // pass used to do for every PID regardless of whether a memory scan was possible.
+
+
+
+
+
+
+
+
             std::wstring imagePath = ProcessFullPathW(pid);
             DetectionFilter::PathClass cls = imagePath.empty()
                 ? DetectionFilter::PathClass::Unknown
@@ -2258,8 +2223,8 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
                 continue;
 
             bool systemTrustedProcess = cls == DetectionFilter::PathClass::SystemTrusted;
-            // Signed binaries in ProgramFiles (IDEs, game clients, tools) generate
-            // TartarusGate-like patterns from profilers/trampolines; skip syscall scan.
+
+
             bool programFilesSigned = (cls == DetectionFilter::PathClass::ProgramFiles) && signedOk;
 
             DWORD64 procScanStart = GetTickCount64();
@@ -2268,14 +2233,14 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
             if (CollectProcessModules(process, modules)) {
                 std::vector<ScannerUI::EmulatorFinding> perProcess;
                 auto threadBases = CollectThreadAllocBases(pid, process, modules);
-                // Process-name match alone is not a trust signal — only relax RWX/JIT
-                // heuristics when the executable is also signed and trusted-dir.
+
+
                 bool isEmuRuntime = DetectionFilter::IsKnownEmulatorRuntime(entry.szExeFile) &&
                                     DetectionFilter::IsTrustedSignedCached(imagePath) &&
                                     DetectionFilter::IsTrustedDir(DetectionFilter::ClassifyPath(imagePath));
 
-                // Collect graphics hook destinations first — used to cross-reference
-                // injected threads/memory and confirm OpenGL/gfx chams payloads.
+
+
                 auto gfxDests = CollectGfxHookDestBases(process, modules);
                 const std::unordered_set<uintptr_t>* pGfxDests = gfxDests.empty() ? nullptr : &gfxDests;
 
@@ -2286,24 +2251,24 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanHiddenMappedDlls(process, procName, modules, perProcess, &threadBases);
                 }
-                // Mudanca 2: thread scan agora roda em TODOS os processos, incluindo sistema.
-                // Thread fora de modulo em lsass/svchost/csrss = indicador critico de injecao.
+
+
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanThreadStartAddresses(pid, procName, process, modules, perProcess, isEmuRuntime, true, true, pGfxDests);
                 }
-                // M1: ScanAnomalousModuleProtections desacoplado do gate systemTrustedProcess.
-                // RWX em regiao MEM_IMAGE = sinal estrutural de hollowing/sideload — vale tambem
-                // para svchost/lsass/csrss legitimos sendo hollowados. O custo do scan e baixo.
+
+
+
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanAnomalousModuleProtections(process, procName, modules, perProcess, pGfxDests);
                 }
-                // Mudanca 4: analise estrutural de modulos carregados (PE anomalias)
+
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanLoadedModuleAnomalies(process, procName, modules, perProcess);
                 }
-                // M1 override: se as varreduras estruturais ja flagaram em processo trusted,
-                // o processo virou suspeito — roda os scans caros (handles/syscalls/strings)
-                // mesmo nele para investigar a payload. Para processos limpos, gate mantido.
+
+
+
                 bool suspectedInjection = !perProcess.empty();
                 bool deepScanGate    = !systemTrustedProcess || suspectedInjection;
                 bool deepCostlyGate  = (!systemTrustedProcess && !programFilesSigned) || suspectedInjection;
@@ -2312,7 +2277,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
                     ScanHiddenThreadsViaKernel(pid, procName, process, modules, perProcess,
                                                isEmuRuntime, pGfxDests);
                 }
-                // Mudanca 5: handles intra-processo com direitos de injecao
+
                 if (deepScanGate &&
                     GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanSuspiciousHandlesInProcess(pid, procName, perProcess);
@@ -2328,7 +2293,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
                 for (auto& f : perProcess) {
                     if (findings.size() >= ScanLimits::kMaxSysmemFindings)
                         break;
-                    // Incluir MEDIUM com prefixo identificador — nao mais descartar silenciosamente
+
                     if (f.severity == "MEDIUM")
                         f.detail = "[SUSPEITO] " + f.detail;
                     findings.push_back(std::move(f));
@@ -2398,11 +2363,7 @@ static bool IsBenignUserLaunchPath(const std::wstring& path) {
            up.find(L"\\PROJECTS\\") != std::wstring::npos;
 }
 
-// P4 — DKOM: cross-check Toolhelp vs NtQuerySystemInformation for hidden processes
-// and hidden threads. Extracted out of CollectSuspiciousProcesses (which used to run
-// this inline) so it can be called on its own, independent of the process-name/entropy
-// heuristics below — the two checks are unrelated and only used to share a function
-// for historical reasons.
+
 std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
     std::vector<ScannerUI::EmulatorFinding> findings;
 
@@ -2456,10 +2417,10 @@ std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
                     }
                 }
 
-                // Thread count divergence: Toolhelp thread count vs NtQuerySystemInformation
-                // A higher thread count in NT than in Toolhelp = hidden threads (DKOM on threads)
+
+
                 {
-                    // Build map: pid -> NT thread count from the buffer we already have
+
                     std::unordered_map<DWORD, DWORD> ntThreadCounts;
                     size_t off2 = 0;
                     while (off2 + 8 <= buf.size()) {
@@ -2477,9 +2438,9 @@ std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
                         if (off2 >= buf.size()) break;
                     }
 
-                    // First pass: compare against Toolhelp snapshot and collect candidates.
-                    // We do not flag yet — a single measurement can diverge due to threads
-                    // being born or dying between the two independent snapshot calls.
+
+
+
                     HANDLE snapT = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
                     if (snapT != INVALID_HANDLE_VALUE) {
                         std::unordered_map<DWORD, DWORD> th32ThreadCounts;
@@ -2495,20 +2456,20 @@ std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
                             DWORD pid   = kv.first;
                             DWORD ntCnt = kv.second;
                             if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) continue;
-                            // Processes with very high thread counts have too much variance
-                            // between snapshots to produce a reliable divergence signal.
+
+
                             if (ntCnt > 200) continue;
                             auto it = th32ThreadCounts.find(pid);
                             DWORD th32Cnt = (it != th32ThreadCounts.end()) ? it->second : 0;
-                            // Require 4+ more threads in NT than Toolhelp to flag.
-                            // A delta of 1-3 is within normal timing variance between the
-                            // two snapshot APIs (threads can be born/die between calls).
+
+
+
                             if (ntCnt > th32Cnt + 3)
                                 candidatePids.insert(pid);
                         }
 
-                        // Second pass: re-measure after 80 ms and only flag PIDs that
-                        // still show divergence — eliminates transient timing artifacts.
+
+
                         if (!candidatePids.empty()) {
                             Sleep(80);
                             ULONG needed2 = 0;
@@ -2575,14 +2536,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
     return findings;
 }
 
-// Suspicious-process heuristics: blacklisted name, or unsigned+packed executable
-// launched from a temp/installer or user-profile path. Used to live in its own
-// CollectSuspiciousProcesses pass with a second full CreateToolhelp32Snapshot walk;
-// now called once per PID from inside CollectSystemMemoryFindings's existing loop.
-// Findings format (f.process without the " [pid]" suffix, f.address as "PID:N")
-// intentionally matches what CollectSuspiciousProcesses used to produce, and this
-// function is not subject to CollectSystemMemoryFindings' kMaxSysmemFindings cap —
-// callers append its output to a separate, uncapped vector, same as before.
+
 static void EvaluateSuspiciousProcessHeuristics(DWORD pid, const std::wstring& rawExeName,
                                                 const std::wstring& fullPath, bool signedOk,
                                                 DetectionFilter::PathClass cls,

@@ -4,8 +4,8 @@
 
 void AppendTerminalLine(ScannerUI::ScanData& data, const std::string& line);
 
-static std::mutex g_scanOptionMutex;          // serializa comandos de terminal
-static std::atomic_bool g_scanRunning = false; // previne scan concorrente sem bloquear UI
+static std::mutex g_scanOptionMutex;
+static std::atomic_bool g_scanRunning = false;
 
 void RunTerminalCommandAsync(const std::string& command, ScannerUI::ScanData& data, std::mutex& dataMutex) {
     std::lock_guard<std::mutex> scanLock(g_scanOptionMutex);
@@ -165,8 +165,6 @@ static void ScanThrottlePause() {
     }
 }
 
-// Called from inside long-running scan loops (per-process, per-region, per-handle, ...)
-// so a busy machine gets short breathing room mid-stage instead of only between stages.
 void MaybePaceIteration(size_t& counter, size_t everyN) {
     if (everyN == 0 || (++counter % everyN) != 0)
         return;
@@ -275,14 +273,14 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
 
     ScanThrottlePause();
     {
-        // USN Journal integrity: detect anti-forensic manipulation of the journal itself
+
         std::string usnStatus, usnDrive;
         auto usnAnomalies = CollectUsnJournalIntegrityFindings(usnStatus, usnDrive);
-        // Change-journal based detection: .pf created (execution confirmed) but deleted (anti-forensic)
+
         auto prefetch  = CollectHiddenPrefetchDetections();
-        // Integrity checks: registry, reparse point, mass deletion, SysMain service
+
         auto prefInteg = CollectPrefetchIntegrityFindings();
-        // Integrity findings go first — tampering indicators take priority in the list
+
         prefInteg.insert(prefInteg.end(), prefetch.begin(), prefetch.end());
         std::lock_guard<std::mutex> lock(dataMutex);
         data.prefetch       = std::move(prefInteg);
@@ -296,7 +294,7 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         AppendTerminalLine(data, "> Prefetch/USN comparison loaded");
     }
 
-    // P5 — Timeline correlation (BAM × Prefetch × USN)
+
     ScanThrottlePause();
     {
         std::string timelineStatus;
@@ -388,9 +386,9 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
 
     ScanThrottlePause();
     {
-        // Mesma posicao/ordem de hoje: achados de heuristica de processo suspeito,
-        // gerados dentro do laco unico de CollectSystemMemoryFindings acima (sem cap,
-        // igual ao comportamento anterior da CollectSuspiciousProcesses removida).
+
+
+
         std::lock_guard<std::mutex> lock(dataMutex);
         for (auto& f : suspiciousProcessFindings)
             data.systemMemoryFindings.push_back(f);
@@ -399,8 +397,8 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
 
     ScanThrottlePause();
     {
-        // DKOM cross-check (Toolhelp vs NtQuerySystemInformation) — antes rodava
-        // embutido no final da CollectSuspiciousProcesses removida; mesma posicao.
+
+
         auto dkomFindings = CollectDkomAnomalies();
         std::lock_guard<std::mutex> lock(dataMutex);
         for (auto& f : dkomFindings)
@@ -463,11 +461,11 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         AppendTerminalLine(data, "> remote port listener scan loaded");
     }
 
-    // DeepScan (PLScan/HJCScan/EHKScan) nao roda automaticamente aqui - e caro
-    // (varredura de memoria de todos os processos, comandos TPM crus, leitura
-    // de arquivos EFI) e so deve rodar quando o usuario clica no botao de scan
-    // do proprio painel (comando "run!pg4", tratado acima). data.deepScanStatus
-    // fica em "Waiting" ate isso acontecer.
+
+
+
+
+
 
     ScanThrottlePause();
     {

@@ -415,8 +415,8 @@ std::vector<ScannerUI::ServiceStatus> CollectServiceStatuses() {
             if (tpmReady) {
                 note = "TPM 2.0 available (TBS service can be stopped while idle)";
             } else {
-                // Check if the board is Intel X99 — that platform has no native TPM 2.0 support.
-                // Read BaseBoardProduct and SystemProductName from the BIOS registry key.
+
+
                 bool isX99 = false;
                 {
                     HKEY hBios = nullptr;

@@ -201,8 +201,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 
 static void OnClose() { PostMessage(g_hWnd, WM_CLOSE, 0, 0); }
 
-// Keeps background scan work from competing evenly with foreground apps/games for
-// CPU and working-set trimming priority; the UI/render thread is left untouched.
+
 static void ApplyBackgroundScanPriority(HANDLE threadHandle) {
     if (!threadHandle)
         return;
@@ -229,7 +228,7 @@ static int LoadingCardY() {
     return kAppWindowY + (kAppWindowH - kLoadingCardH) / 2;
 }
 
-// Depois da introducao compacta, expande para a interface completa do scanner.
+
 static void ApplyStartupWindowTransform(float loadingElapsed) {
     static bool finished = false;
     if (finished)

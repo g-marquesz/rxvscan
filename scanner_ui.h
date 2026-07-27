@@ -1,13 +1,5 @@
 
 
-
-
-
-
-
-
-
-
 #pragma once
 
 #include "imgui.h"
@@ -30,9 +22,6 @@ inline constexpr float kTerminalExpandedH = 210.0f;
 inline constexpr float kStatusH   = 30.0f;
 inline constexpr float kLoadingHoldSeconds  = 1.65f;
 inline constexpr float kLoadingMorphSeconds = 0.90f;
-
-
-
 
 struct ServiceStatus {
     std::string name;
@@ -83,11 +72,11 @@ struct GenericBypassFinding {
 };
 
 struct StreamModFinding {
-    std::string type;      // CAPTURE_EXCLUDE, OBS_PLUGIN, VIRTUAL_DISPLAY, DWM_INJECT, DWM_HOOK, OVERLAY
+    std::string type;
     std::string process;
     std::string target;
     std::string detail;
-    std::string severity;  // HIGH / MEDIUM / FLAG
+    std::string severity;
 };
 
 struct DeepScanFinding {
@@ -95,24 +84,24 @@ struct DeepScanFinding {
     std::string process;
     std::string target;
     std::string detail;
-    std::string severity;  // HIGH / MEDIUM / FLAG
+    std::string severity;
 };
 
 struct RemotePortFinding {
-    std::string protocol;       // TCP, TCP6, UDP, UDP6
+    std::string protocol;
     std::string port;
-    std::string bindAddress;    // 0.0.0.0, 127.0.0.1, ::, LAN IP
+    std::string bindAddress;
     std::string pid;
-    std::string process;        // basename
-    std::string path;           // canonicalised path
-    std::string signer;         // "UNSIGNED" or "<CN> <thumbprint8>"
-    std::string parentChain;    // walked ancestry
-    std::string scriptOrHost;   // interpreter script alvo / svchost service host
-    std::string firewallRule;   // inbound allow rule name (empty if none)
-    std::string tunnelPeer;     // ngrok/cloudflared/frpc basename if co-running
-    std::string reason;         // short reason
-    std::string detail;         // verbose dump (cmdline, etc.)
-    std::string severity;       // HIGH / MEDIUM / FLAG
+    std::string process;
+    std::string path;
+    std::string signer;
+    std::string parentChain;
+    std::string scriptOrHost;
+    std::string firewallRule;
+    std::string tunnelPeer;
+    std::string reason;
+    std::string detail;
+    std::string severity;
 };
 
 struct EfiCheatFinding {
@@ -155,11 +144,11 @@ struct RegistryFinding {
 struct ClsidFinding {
     std::string date;
     std::string time;
-    std::string severity;        // "HIGH", "MEDIUM", "FLAG"
-    std::string clsid;           // {XXXXXXXX-XXXX-...}
+    std::string severity;
+    std::string clsid;
     std::string friendlyName;
-    std::string hivePath;        // "HKCU", "HKCR"
-    std::string serverType;      // "InprocServer32" | "LocalServer32"
+    std::string hivePath;
+    std::string serverType;
     std::string serverPath;
     std::string reason;
     std::string detail;
@@ -218,7 +207,7 @@ struct DriverIntegrityFinding {
     int         maliciousScore   = 0;
     std::string verdict;
     bool        isCrashDumpDriver = false;
-    // P1 — Certificate deep analysis
+
     bool        certSelfSigned      = false;
     bool        certEkuMismatch     = false;
     bool        certHomoglyphCn     = false;
@@ -226,22 +215,22 @@ struct DriverIntegrityFinding {
     int         certChainDepth      = 0;
     std::string certSerial;
     std::string certIssuerCN;
-    // P2 — Import behavior fingerprinting
+
     bool        importInjectionCombo = false;
     bool        importDmaCombo       = false;
     bool        importPhysMemAccess  = false;
     bool        importIoctlSurface   = false;
     bool        importCountSuspect   = false;
     std::string impHash;
-    // P3 — PE section deep analysis
+
     bool        missingRichHeader        = false;
     bool        nonStandardAlignment     = false;
     bool        codeEntropySpike         = false;
     bool        virtualRawRatioAnomalous = false;
     bool        stringObfuscation        = false;
-    // P6 — BYOVD hash match
+
     bool        byovdHashMatch = false;
-    // P8 — Anti-analysis patterns
+
     bool        hasRdtscCheck    = false;
     bool        hasCpuidVmCheck  = false;
     bool        hasPebDebugCheck = false;
@@ -275,47 +264,40 @@ struct ScanData {
     ImVec4 accentColor = ImVec4(0.24f, 0.26f, 0.30f, 1.00f);
     bool alwaysOnTop   = false;
 
-
     std::vector<ServiceStatus> services;
-
 
     std::string hwid;
     std::string hwidWarning;
 
-
     std::string boot, explorer, biosVersion, biosMode, osVersion;
     std::string device, pagefile, sysType;
-    bool boardIsX99 = false;   // placa-mae Intel X99 detectada (BaseBoardProduct/SystemProductName)
-    bool cpuIsXeon  = false;   // CPU Xeon detectada (ProcessorNameString)
-    std::string boardProduct; // string crua do board, para tooltip
-    std::string cpuName;      // string crua do CPU, para tooltip
+    bool boardIsX99 = false;
+    bool cpuIsXeon  = false;
+    std::string boardProduct;
+    std::string cpuName;
     float inspectZoom = 1.20f;
 
-
     std::vector<BamEntry> bam;
-
 
     int          prefetchHits = 0;
     std::vector<PrefetchHit> prefetch;
 
-
     std::string usnStatus;
     std::string usnDrive;
     std::vector<PrefetchHit> usnAnomalies;
-    std::string usnAnomalyStatus = "OK"; // "OK" or "ANOMALY"
-
+    std::string usnAnomalyStatus = "OK";
 
     std::string sysmonStatus = "Waiting";
     std::vector<SysmonEvent> sysmonEvents;
     int sysmonEventFilter = 0;
-    // Triage view state — see DrawSysmon redesign plan.
-    int sysmonViewMode = 0;                 // 0 = Triage (novo), 1 = Flat (legado)
-    int sysmonExpandedIdx = -1;             // indice do row expandido inline, -1 = nenhum
-    int sysmonTimeBucket = -1;              // minuto-do-dia selecionado, -1 = nenhum
-    char sysmonProcessFilter[160] = {};     // basename, exact match
+
+    int sysmonViewMode = 0;
+    int sysmonExpandedIdx = -1;
+    int sysmonTimeBucket = -1;
+    char sysmonProcessFilter[160] = {};
     bool sysmonDerivedReady = false;
-    std::vector<uint32_t> sysmonEventMinute;   // paralelo a sysmonEvents (HH*60+MM)
-    std::vector<uint8_t>  sysmonEventSeverity; // paralelo: 0=green, 1=yellow, 2=red
+    std::vector<uint32_t> sysmonEventMinute;
+    std::vector<uint8_t>  sysmonEventSeverity;
     char sysmonTextFilter[160] = {};
     char sysmonAccessFilter[64] = {};
     char sysmonSourceFilter[160] = {};
@@ -329,7 +311,6 @@ struct ScanData {
     char sysmonDnsFilter[180] = {};
     char sysmonStartFilter[80] = {};
 
-
     bool  emulatorChecking = true;
     float emulatorProgress = 0.55f;
     std::string emulatorResult;
@@ -337,10 +318,8 @@ struct ScanData {
     std::string emulatorOpenedAt = "-";
     std::vector<EmulatorFinding> emulatorFindings;
 
-
     std::string systemMemoryStatus = "Waiting";
     std::vector<EmulatorFinding> systemMemoryFindings;
-
 
     std::string genericBypassStatus = "Waiting";
     std::vector<GenericBypassFinding> genericBypass;
@@ -354,22 +333,18 @@ struct ScanData {
     std::string deepScanStatus = "Waiting";
     std::vector<DeepScanFinding> deepScanFindings;
 
-
     int activePage = 1;
     std::string efiCheatStatus = "Waiting";
     std::vector<EfiCheatFinding> efiCheats;
 
-
     std::string driverIntegrityStatus = "Waiting";
     std::vector<DriverIntegrityFinding> driverIntegrity;
-
 
     std::string kernelDriverStatus = "Waiting";
     std::vector<KernelDriverFinding> kernelDrivers;
 
     std::string kernelAnomalyStatus = "Waiting";
     std::vector<KernelAnomalyFinding> kernelAnomalies;
-
 
     std::string registryStatus = "Waiting";
     std::vector<RegistryFinding> registryFindings;
@@ -382,32 +357,26 @@ struct ScanData {
     char efiFilter[128]   = {};
     int  efiSevFilter     = 0;
 
-
     char drvIntFilter[128] = {};
     int  drvIntSevFilter   = 0;
-
 
     char kdrvFilter[128]  = {};
     int  kdrvSevFilter    = 0;
 
-
     char bamFilter[128]   = {};
     int  bamReasonFilter  = 0;
-
 
     char bypassFilter[128] = {};
     int  bypassTypeFilter  = 0;
 
-
     char deepScanFilter[128] = {};
-    int  deepScanSevFilter   = 0; // 0=ALL, 1=HIGH, 2=MEDIUM
-
+    int  deepScanSevFilter   = 0;
 
     char memFilter[128]   = {};
     int  memSevFilter     = 0;
     int  memTypeFilter    = 0;
 
-    // P5 — Timeline correlation
+
     std::string timelineStatus = "Waiting";
     std::vector<TimelineCorrelationFinding> timelineFindings;
     char timelineFilter[128] = {};
@@ -418,10 +387,9 @@ struct ScanData {
     char terminalInput[160] = {};
     std::string pendingCommand;
 
-
     bool debugMode = false;
 
-    void* logoTexture = nullptr;  // ID3D11ShaderResourceView* cast to void*
+    void* logoTexture = nullptr;
     void* generalIconTexture = nullptr;
     void* efiIconTexture = nullptr;
     void* emuIconTexture = nullptr;
@@ -436,9 +404,6 @@ struct ScanData {
     std::string elapsed = "00:00:32";
     std::string currentStage = "Inicializando scanner";
 };
-
-
-
 
 namespace col {
     inline const ImVec4 Bg        = ImVec4(0.009f, 0.010f, 0.012f, 1.00f);
@@ -468,9 +433,6 @@ namespace col {
         AccentDim = MakeAccentDim(Accent);
     }
 }
-
-
-
 
 inline void ApplyTheme() {
     ImGuiStyle& s = ImGui::GetStyle();
@@ -518,9 +480,6 @@ inline void ApplyTheme() {
     c[ImGuiCol_TabUnfocused]      = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_TabUnfocusedActive]= ImVec4(0.050f, 0.064f, 0.086f, 1.00f);
 }
-
-
-
 
 namespace detail {
 
@@ -594,12 +553,10 @@ inline bool OpenFileLocation(const std::string& path) {
     return true;
 }
 
-// Formats "ExeName.exe [1234]" → "ExeName.exe 1234"
-// Used to build headline text: "MAPPER in Discord.exe 1234  0x00ABCDEF"
 inline std::string FindingHeadline(const std::string& type,
                                    const std::string& process,
                                    const std::string& address) {
-    // Strip brackets from "[PID]" → " PID"
+
     std::string proc = process;
     auto lb = proc.find(" [");
     auto rb = proc.rfind(']');
@@ -1012,7 +969,6 @@ inline void ServiceChip(const ServiceStatus& sv, int index) {
     ImGui::PopID();
 }
 
-
 inline void StatusGlyph(bool ok) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1032,7 +988,6 @@ inline void StatusGlyph(bool ok) {
     ImGui::Dummy(ImVec2(s + 2.0f, h));
 }
 
-
 inline bool FolderButton(const char* id) {
     float h = ImGui::GetTextLineHeight();
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1050,14 +1005,12 @@ inline bool FolderButton(const char* id) {
     return clicked;
 }
 
-
 inline void SeverityTag(const std::string& sev) {
     ImVec4 c = col::Yellow;
     if (sev == "HIGH" || sev == "CRITICAL") c = col::Red;
     else if (sev == "LOW")                  c = col::Green;
     ImGui::TextColored(c, "%s", sev.c_str());
 }
-
 
 inline void KeyValue(const char* key, const std::string& value) {
     ImGui::PushStyleColor(ImGuiCol_Text, col::TextDim);
@@ -1430,13 +1383,10 @@ inline void MiniMeter(const char* label, int value, const ImVec4& color) {
     ImGui::EndGroup();
 }
 
-
-
 inline void DrawPinIcon(ImDrawList* dl, ImVec2 center, float r, ImU32 color) {
     float headR = r * 0.60f;
     float headCY = center.y - r * 0.18f;
     float tipY  = center.y + r * 0.92f;
-
 
     ImVec2 tri[3] = {
         ImVec2(center.x - headR * 0.82f, headCY + headR * 0.30f),
@@ -1445,9 +1395,7 @@ inline void DrawPinIcon(ImDrawList* dl, ImVec2 center, float r, ImU32 color) {
     };
     dl->AddTriangleFilled(tri[0], tri[1], tri[2], color);
 
-
     dl->AddCircleFilled(ImVec2(center.x, headCY), headR, color);
-
 
     ImU32 innerCol = IM_COL32(14, 14, 22, 230);
     dl->AddCircleFilled(ImVec2(center.x, headCY), headR * 0.36f, innerCol);
@@ -1496,8 +1444,6 @@ inline void AccentColorButton(ScanData& d, const ImVec2& size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 center(screenPos.x + radius, screenPos.y + radius);
 
-
-
     constexpr int kSlices = 18;
     for (int i = 0; i < kSlices; ++i) {
         float a0 = (float)i / kSlices * 6.28318530f - 1.57079632f;
@@ -1511,13 +1457,10 @@ inline void AccentColorButton(ScanData& d, const ImVec2& size) {
         dl->PathFillConvex(sliceCol);
     }
 
-
     float innerR = radius * 0.46f;
     dl->AddCircleFilled(center, innerR, ImGui::GetColorU32(d.accentColor));
 
-
     dl->AddCircle(center, innerR, IM_COL32(14, 14, 22, 180), 32, 1.2f);
-
 
     ImU32 borderCol = IM_COL32(255, 255, 255, hovered ? 130 : 40);
     dl->AddCircle(center, radius - 0.5f, borderCol, 32, 1.0f);
@@ -1569,14 +1512,10 @@ inline void AccentColorButton(ScanData& d, const ImVec2& size) {
     }
 }
 
-
-
-
 inline std::string FLow(std::string s) {
     for (char& c : s) c = (char)tolower((unsigned char)c);
     return s;
 }
-
 
 inline bool FMatch(const std::string& needle,
                    std::initializer_list<std::string> fields) {
@@ -1587,8 +1526,6 @@ inline bool FMatch(const std::string& needle,
     }
     return false;
 }
-
-
 
 inline void FilterBar(const char* searchId, char* buf, size_t bufSz,
                       const char* comboId, int* sel, const char* comboItems, int numItems,
@@ -1612,11 +1549,6 @@ inline void FilterBar(const char* searchId, char* buf, size_t bufSz,
 }
 
 }
-
-
-
-
-
 
 inline void TitleBar(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)() = nullptr,
                      void(*onToggleTopmost)(bool) = nullptr) {
@@ -1652,7 +1584,6 @@ inline void TitleBar(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)(
     ImGui::PushStyleColor(ImGuiCol_Text, col::Header);
     ImGui::Text("%s", d.title.c_str());
     ImGui::PopStyleColor();
-
 
     ImGui::SameLine(0, 14);
     {
@@ -1705,7 +1636,6 @@ inline void TitleBar(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)(
     const float colorY = (barH - colorButtonSize.y) * 0.5f;
     const float pinY = (barH - pinButtonSize.y) * 0.5f;
 
-
     ImGui::SetCursorPos(ImVec2(pinX, pinY));
     ImGui::InvisibleButton("##pin-topmost", pinButtonSize);
     if (ImGui::IsItemClicked()) {
@@ -1724,7 +1654,6 @@ inline void TitleBar(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)(
             pinCol = ImGui::GetColorU32(ImVec4(0.70f, 0.70f, 0.80f, 1.0f));
         else
             pinCol = ImGui::GetColorU32(ImVec4(0.38f, 0.38f, 0.48f, 1.0f));
-
 
         if (d.alwaysOnTop || pinHovered) {
             float bgAlpha = d.alwaysOnTop ? 0.15f : 0.08f;
@@ -1751,7 +1680,6 @@ inline void TitleBar(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)(
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
-
 
 }
 
@@ -1890,7 +1818,7 @@ inline void DrawSidebar(ScanData& d, float height) {
     ImGui::TextColored(d.emulatorOpenedAt == "-" ? col::TextDim : col::Header,
                        "%s", emuClock.c_str());
 
-    // So aparece quando detectado - nao polui a sidebar em maquinas normais.
+
     if (d.boardIsX99 || d.cpuIsXeon) {
         sectionTitle("Hardware");
         if (d.boardIsX99) {
@@ -1992,7 +1920,6 @@ inline void DrawPageHeader(const ScanData& d) {
     ImGui::PopStyleColor(2);
     ImGui::Spacing();
 }
-
 
 inline void DrawSysmon(ScanData& d, bool showInspectButton = false);
 
@@ -2440,9 +2367,6 @@ inline void DrawDashboard(ScanData& d) {
     DrawSysmon(d, true);
 }
 
-
-
-
 inline void DrawServices(ScanData& d) {
     detail::BeginPanel("##services", "Services", 164.0f);
     ImGui::TextColored(col::TextDim, "PC LIGADO EM");
@@ -2478,17 +2402,12 @@ inline void DrawServices(ScanData& d) {
     detail::EndPanel();
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Sysmon derived data (lazy, recomputed when sysmonEvents grows or scan resets).
-// Severity heuristics live here so the renderer just reads a uint8_t per event.
-// ───────────────────────────────────────────────────────────────────────────
-
 struct SysmonProcessAggregate {
     std::string basename;
     std::string fullPath;
     int totalEvents = 0;
-    int perEventCount[64] = {};   // indexed by sysmon event id; only 1/6/7/8/10/13/22 used
-    uint8_t perEventSeverity[64] = {}; // max severity seen per event id
+    int perEventCount[64] = {};
+    uint8_t perEventSeverity[64] = {};
     uint8_t maxSeverity = 0;
 };
 
@@ -2534,7 +2453,7 @@ inline bool IsIpv4Literal(const std::string& q) {
 }
 
 inline uint32_t MinuteFromHms(const std::string& time) {
-    // Expect "HH:MM:SS" — fall back to 0.
+
     if (time.size() < 5) return 0;
     int hh = (time[0] - '0') * 10 + (time[1] - '0');
     int mm = (time[3] - '0') * 10 + (time[4] - '0');
@@ -2548,7 +2467,7 @@ inline uint8_t ScoreSeverity(const SysmonEvent& e) {
     };
     switch (e.eventId) {
         case 8:
-            return 2; // CreateRemoteThread — always elevate
+            return 2;
         case 10: {
             if (contains(e.access, "0x1f0fff") || contains(e.access, "0x1fffff") ||
                 contains(e.access, "vm_write") || contains(e.access, "create_thread"))
@@ -2607,7 +2526,7 @@ inline uint8_t ScoreSeverity(const SysmonEvent& e) {
     return 0;
 }
 
-} // namespace detail_sysmon
+}
 
 inline void ComputeSysmonDerived(ScanData& d) {
     const size_t n = d.sysmonEvents.size();
@@ -2625,13 +2544,12 @@ inline void ComputeSysmonDerived(ScanData& d) {
     d.sysmonDerivedReady = true;
 }
 
-// Builds the per-process aggregate table sorted by total events desc, max severity tiebreak.
 inline std::vector<SysmonProcessAggregate> BuildSysmonProcessAggregates(const ScanData& d) {
     std::unordered_map<std::string, SysmonProcessAggregate> bag;
     bag.reserve(64);
     for (size_t i = 0; i < d.sysmonEvents.size(); ++i) {
         const auto& e = d.sysmonEvents[i];
-        // Prefer sourceProcess when set (events 8/10), else process.
+
         std::string full = e.sourceProcess.empty() ? e.process : e.sourceProcess;
         if (full.empty()) continue;
         std::string base = detail_sysmon::BaseNameOfPathA(full);
@@ -2672,10 +2590,6 @@ inline ImVec4 SysmonSeverityColor(uint8_t sev) {
     }
 }
 
-// Renders the body that used to live inline in the legacy per-event card.
-// Called both from Flat mode (preserves layout) and Triage mode (inside the
-// expanded-row container). `sevColor` drives the badge color so the same body
-// reads green/yellow/red based on heuristics instead of always red.
 inline void DrawSysmonExpandedBody(const ScanData& d, size_t i, const ImVec4& sevColor) {
     const auto& e = d.sysmonEvents[i];
     if (e.eventId == 10) {
@@ -2739,18 +2653,13 @@ inline void DrawSysmonExpandedBody(const ScanData& d, size_t i, const ImVec4& se
     }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Triage view — process-centric + timeline + compact rows with inline expand.
-// Reachable via the [Triage]/[Flat] toggle in Zone A. Flat mode falls through
-// to the legacy code path below this function.
-// ───────────────────────────────────────────────────────────────────────────
 inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
     ComputeSysmonDerived(d);
 
     constexpr int kBuckets = 60;
     const size_t n = d.sysmonEvents.size();
 
-    // ── histogram buckets (computed per frame; n is at most a few thousand) ──
+
     uint32_t minMinute = 0, maxMinute = 0;
     bool haveAny = false;
     for (size_t i = 0; i < n; ++i) {
@@ -2777,10 +2686,10 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
         if (bucketCount[b] > maxBucket) maxBucket = bucketCount[b];
     }
 
-    // ── process aggregates ──
+
     std::vector<SysmonProcessAggregate> procs = BuildSysmonProcessAggregates(d);
 
-    // ── visible filter ──
+
     auto lower = [](std::string text) {
         std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
             return (char)std::tolower(c);
@@ -2815,7 +2724,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
         visible.push_back(i);
     }
 
-    // ── panel ──
+
     const float zoneA = 36.0f;
     const float zoneB = n == 0 ? 0.0f : 60.0f;
     const float zoneC = procs.empty() ? 0.0f : 88.0f;
@@ -2833,7 +2742,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
         ImGui::SameLine();
     }
 
-    // ── Zone A: status row + mode toggle ──
+
     ImGui::TextColored(col::TextDim, "STATUS");
     ImGui::SameLine();
     ImGui::TextColored(statusColor, "%s", d.sysmonStatus.c_str());
@@ -2863,7 +2772,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
     }
     ImGui::Spacing();
 
-    // ── Zone B: time histogram ──
+
     if (n > 0) {
         const ImVec2 histMin = ImGui::GetCursorScreenPos();
         const float histW = ImGui::GetContentRegionAvail().x;
@@ -2911,7 +2820,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
         ImGui::Spacing();
     }
 
-    // ── Zone C: top offenders (horizontal scroll) ──
+
     if (!procs.empty()) {
         ImGui::BeginChild("##sm-offenders", ImVec2(0.0f, 76.0f), false,
                           ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -2939,7 +2848,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
             std::string fp = detail::CompactText(detail::CompactPath(agg.fullPath, 32), 32);
             dl->AddText(ImVec2(cp.x + 12.0f, cp.y + 26.0f),
                         ImGui::GetColorU32(col::TextDim), fp.c_str());
-            // event-id chips along the bottom row
+
             float chipX = cp.x + 12.0f;
             const float chipY = cp.y + 44.0f;
             for (int idIdx = 1; idIdx < (int)IM_ARRAYSIZE(kEventIds); ++idIdx) {
@@ -2975,7 +2884,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
         ImGui::EndChild();
     }
 
-    // ── Zone D: active filter chips + text search ──
+
     auto drawPill = [](const char* label) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetColorU32(col::PanelLift));
         ImGui::SmallButton(label);
@@ -3016,7 +2925,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
     }
     ImGui::Spacing();
 
-    // ── Zone E: compact event list with clipper + inline expand ──
+
     ImGui::BeginChild("##sm-list", ImVec2(0.0f, listH), true,
                       ImGuiWindowFlags_AlwaysVerticalScrollbar);
     ImGuiListClipper clipper;
@@ -3042,13 +2951,13 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
                                                                         expanded ? 0.65f : 0.35f)),
                                   3.0f);
             }
-            // sev bar
+
             dl->AddRectFilled(rp, ImVec2(rp.x + 3.0f, rp.y + 28.0f),
                               ImGui::GetColorU32(sevColor), 1.5f);
-            // time
+
             dl->AddText(ImVec2(rp.x + 10.0f, rp.y + 6.0f),
                         ImGui::GetColorU32(col::TextDim), e.time.c_str());
-            // event id badge
+
             char idBuf[8];
             snprintf(idBuf, sizeof(idBuf), "%d", e.eventId);
             const ImVec2 idSize = ImGui::CalcTextSize(idBuf);
@@ -3058,12 +2967,12 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
                               ImGui::GetColorU32(detail::ColorAlpha(sevColor, 0.20f)), 2.0f);
             dl->AddText(ImVec2(badgeX + 6.0f, rp.y + 5.0f),
                         ImGui::GetColorU32(sevColor), idBuf);
-            // process basename
+
             std::string srcPath = e.sourceProcess.empty() ? e.process : e.sourceProcess;
             std::string bn = detail::CompactText(detail_sysmon::BaseNameOfPathA(srcPath), 24);
             dl->AddText(ImVec2(rp.x + 130.0f, rp.y + 6.0f),
                         ImGui::GetColorU32(col::Header), bn.c_str());
-            // one-line detail
+
             std::string detailLine;
             switch (e.eventId) {
                 case 10: detailLine = "→ " + detail_sysmon::BaseNameOfPathA(e.targetProcess) +
@@ -3082,7 +2991,7 @@ inline void DrawSysmonTriage(ScanData& d, bool showInspectButton) {
                         ImGui::GetColorU32(col::Text), detailLine.c_str());
             if (rowHover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             if (rowClick) d.sysmonExpandedIdx = expanded ? -1 : (int)i;
-            // Expanded body — re-uses the legacy renderer.
+
             if (expanded) {
                 ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + 30.0f));
                 ImGui::Indent(8.0f);
@@ -3721,7 +3630,7 @@ inline void DrawUsn(ScanData& d) {
         ImGui::EndTable();
     }
 
-    // Anomaly findings list — same card pattern as prefetch
+
     if (hasAnomalies) {
         ImGui::Spacing();
         for (size_t i = 0; i < d.usnAnomalies.size(); ++i) {
@@ -3860,7 +3769,7 @@ inline void DrawSystemMemory(ScanData& d) {
     const float panelH = 126.0f + (float)totalFindings * (cardH + 8.0f);
     detail::BeginPanel("##winscan", "WinScan", panelH);
 
-    // Combined status: kernel anomalies + user-mode memory findings
+
     bool kernelDetected = d.kernelAnomalyStatus == "DETECTED";
     bool kernelReview   = d.kernelAnomalyStatus == "REVIEW";
     bool memDetected    = d.systemMemoryStatus == "DETECTED";
@@ -3914,7 +3823,7 @@ inline void DrawSystemMemory(ScanData& d) {
     };
     { const std::string needle = detail::FLow(std::string(d.memFilter));
 
-    // User-mode memory findings
+
     for (size_t i = 0; i < d.systemMemoryFindings.size(); ++i) {
         const auto& f = d.systemMemoryFindings[i];
         if (d.memTypeFilter > 0 && f.type != kMemTypes[d.memTypeFilter]) continue;
@@ -3954,7 +3863,7 @@ inline void DrawSystemMemory(ScanData& d) {
         ImGui::Spacing();
     }
 
-    // Kernel anomaly findings (mapper, hollowing, BYOVD)
+
     for (size_t i = 0; i < d.kernelAnomalies.size(); ++i) {
         const auto& f = d.kernelAnomalies[i];
         if (d.memTypeFilter > 0 && f.type != kMemTypes[d.memTypeFilter]) continue;
@@ -4082,9 +3991,9 @@ inline void DrawGenericBypass(ScanData& d) {
         "CAPTURE_EXCLUDE", "OBS_PLUGIN", "OBS_INJECT", "VIRTUAL_DISPLAY", "DWM_INJECT", "DWM_HOOK",
         "OVERLAY", "NVFBC_ALLOW", "VIRTUAL_CAMERA", "REMOTE_PORT"
     };
-    // indices 1-9   → generic bypass only
-    // indices 10-18 → stream mod only
-    // index   19    → remote port only
+
+
+
     const bool showBypass     = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 1 && d.bypassTypeFilter <= 12);
     const bool showStreamMod  = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 13 && d.bypassTypeFilter <= 21);
     const bool showRemotePort = d.bypassTypeFilter == 0 || d.bypassTypeFilter == 22;
@@ -4248,7 +4157,7 @@ inline void DrawGenericBypass(ScanData& d) {
 inline void DrawDeepScan(ScanData& d) {
     const float cardH  = 100.0f;
     const float panelH = 190.0f + (float)d.deepScanFindings.size() * (cardH + 8.0f);
-    detail::BeginPanel("##deep-scan", "\xF0\x9F\x94\x8E DeepScan", panelH); // 🔍 DeepScan
+    detail::BeginPanel("##deep-scan", "\xF0\x9F\x94\x8E DeepScan", panelH);
 
     const size_t totalFindings = d.deepScanFindings.size();
     bool loading = (d.deepScanStatus == "Loading");
@@ -4292,9 +4201,9 @@ inline void DrawDeepScan(ScanData& d) {
 
     const std::string needle = detail::FLow(std::string(d.deepScanFilter));
 
-    // Agrupa os indices ja filtrados (busca + severidade) por topico, para que
-    // cada topico do DeepScan (PLScan, HJCScan, ...) seja renderizado como uma
-    // secao separada em vez de uma lista unica misturada.
+
+
+
     std::vector<size_t> plscanIdx, hjcscanIdx, ehkscanIdx, lxascanIdx, trhscanIdx, krtscanIdx, otherIdx;
     for (size_t i = 0; i < d.deepScanFindings.size(); ++i) {
         const auto& f = d.deepScanFindings[i];
@@ -4358,11 +4267,11 @@ inline void DrawDeepScan(ScanData& d) {
         for (size_t i : idx) drawCard(i);
     };
 
-    drawTopic("\xF0\x9F\x92\x89 PLScan", plscanIdx);    // 💉 PLScan
-    drawTopic("\xF0\x9F\xAA\x9D HJCScan", hjcscanIdx);  // 🪝 HJCScan
-    drawTopic("\xF0\x9F\xA5\xBE EHKScan", ehkscanIdx);  // 🥾 EHKScan
-    drawTopic("\xF0\x9F\x8E\xAD LXAScan", lxascanIdx);  // 🎭 LXAScan
-    drawTopic("\xF0\x9F\xA7\xB5 TRHScan", trhscanIdx);  // 🧵 TRHScan
+    drawTopic("\xF0\x9F\x92\x89 PLScan", plscanIdx);
+    drawTopic("\xF0\x9F\xAA\x9D HJCScan", hjcscanIdx);
+    drawTopic("\xF0\x9F\xA5\xBE EHKScan", ehkscanIdx);
+    drawTopic("\xF0\x9F\x8E\xAD LXAScan", lxascanIdx);
+    drawTopic("\xF0\x9F\xA7\xB5 TRHScan", trhscanIdx);
     drawTopic("KRTScan", krtscanIdx);
     drawTopic("Outros", otherIdx);
 
@@ -4731,7 +4640,7 @@ inline void DrawRegistryAndClsidFindings(ScanData& d) {
         + (float)d.clsidFindings.size()    * (clsidCardH + 8.0f);
     detail::BeginPanel("##registry-com-persist", "Registry & COM Hijack Detection", panelH);
 
-    // Combined status = worst-of(registryStatus, clsidStatus)
+
     auto statusRank = [](const std::string& s) {
         if (s == "DETECTED") return 3;
         if (s == "REVIEW")   return 2;
@@ -4887,7 +4796,7 @@ inline void DrawRegistryAndClsidFindings(ScanData& d) {
         ImGui::Spacing();
     }
 
-    // Confirmation modal — must be in same call stack as OpenPopup
+
     if (ImGui::BeginPopupModal("##clsid-clean-confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         int idx = d.clsidPendingCleanIdx;
         if (idx >= 0 && idx < (int)d.clsidFindings.size()) {
@@ -4923,7 +4832,6 @@ inline void DrawRegistryAndClsidFindings(ScanData& d) {
 inline void DrawBottom(ScanData& d) {
     const float statusH = kStatusH;
     const float termH   = d.terminalExpanded ? kTerminalExpandedH : kTerminalH;
-
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, col::BgTitle);
     ImGui::PushStyleColor(ImGuiCol_Border, col::Sep);
@@ -5037,7 +4945,6 @@ inline void DrawBottom(ScanData& d) {
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(2);
 
-
     ImGui::PushStyleColor(ImGuiCol_ChildBg, col::BgTitle);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 7.0f);
     ImGui::BeginChild("##status", ImVec2(0, statusH), false,
@@ -5062,12 +4969,10 @@ inline void DrawBottom(ScanData& d) {
     ImGui::SameLine(0, 6);
     ImGui::TextColored(col::Header, "%s", d.elapsed.c_str());
 
-
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
 }
-
 
 inline float LoadingIntroDuration() {
     return kLoadingHoldSeconds + kLoadingMorphSeconds;
@@ -5162,8 +5067,6 @@ inline bool RenderLoadingOverlay(ScanData& d, float elapsedSeconds) {
     return true;
 }
 
-// Janela final do scanner: apenas uma barra de progresso com o estagio atual.
-// Os resultados completos permanecem disponíveis somente na interface do scanner.
 inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     col::SetAccentColor(d.accentColor);
 
@@ -5179,7 +5082,7 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     const float progress = detail::Saturate(d.scanProgress);
     const ImVec4 accent = failed ? col::Red : col::Accent;
 
-    // fundo do cartao + leve grade animada + brilho percorrendo a borda
+
     dl->AddRectFilled(winMin, winMax, ImGui::GetColorU32(col::Panel), 8.0f);
     dl->PushClipRect(winMin, winMax, true);
     detail::DrawLoadingMicroGrid(dl, winMin, winMax, now, finished || failed ? 0.5f : 1.0f);
@@ -5206,7 +5109,7 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     dl->AddText(ImVec2(textX, winMin.y + 62.0f), ImGui::GetColorU32(detail::LoadMuted),
                 failed ? "Falha durante a analise" : finished ? "Analise concluida" : "Analisando sua maquina");
 
-    // botao de fechar no canto superior direito
+
     if (onClose) {
         const ImVec2 btnMax(winMax.x - 18.0f, winMin.y + 32.0f);
         const ImVec2 btnMin(btnMax.x - 22.0f, btnMax.y - 22.0f);
@@ -5227,7 +5130,7 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     dl->AddLine(ImVec2(winMin.x + 28.0f, winMin.y + 96.0f), ImVec2(winMax.x - 28.0f, winMin.y + 96.0f),
                 detail::ColorAlpha(detail::LoadWhite, 0.06f));
 
-    // linha de status: ponto pulsante + etapa atual + selo de porcentagem
+
     const float statusY = winMin.y + 119.0f;
     const float pulse = 0.5f + 0.5f * std::sin(now * 3.8f);
     dl->AddCircleFilled(ImVec2(winMin.x + 32.0f, statusY + 7.0f), 5.0f,
@@ -5246,7 +5149,7 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     dl->AddRect(badgeMin, badgeMax, detail::ColorAlpha(accent, 0.30f), 4.0f);
     dl->AddText(ImVec2(badgeMin.x + 8.0f, statusY), detail::ColorAlpha(detail::LoadWhite, 0.92f), percentText);
 
-    // barra de progresso com brilho na ponta
+
     const ImVec2 railMin(winMin.x + 28.0f, winMin.y + 157.0f);
     const ImVec2 railMax(winMax.x - 28.0f, railMin.y + 8.0f);
     dl->AddRectFilled(railMin, railMax, detail::ColorAlpha(detail::LoadWhite, 0.08f), 4.0f);
@@ -5259,7 +5162,7 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     }
     dl->AddRect(railMin, railMax, detail::ColorAlpha(col::Header, 0.06f), 4.0f);
 
-    // visualizacao de atividade ao vivo do scanner
+
     const ImVec2 activityMin(winMin.x + 28.0f, winMin.y + 192.0f);
     const ImVec2 activityMax(winMax.x - 28.0f, winMin.y + 318.0f);
     if (!finished && !failed) {
@@ -5671,9 +5574,6 @@ inline void DrawShortcutBar(ScanData& d) {
     ImGui::Dummy(ImVec2(0.0f, 5.0f));
 }
 
-
-
-
 inline void Render(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)() = nullptr,
                    void(*onToggleTopmost)(bool) = nullptr) {
     col::SetAccentColor(d.accentColor);
@@ -5697,7 +5597,6 @@ inline void Render(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)() 
     detail::DrawAnimatedScannerBorder(ImGui::GetWindowPos(), ImGui::GetWindowSize());
 
     TitleBar(d, onMinimize, onClose, onToggleTopmost);
-
 
     const float terminalHeight = d.terminalExpanded ? kTerminalExpandedH : kTerminalH;
     float reserved = terminalHeight + kStatusH + 18.0f;
@@ -5743,9 +5642,6 @@ inline void Render(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)() 
     ImGui::End();
 }
 
-
-
-
 inline ScanData MakeSampleData() {
     ScanData d;
     d.services = {
@@ -5778,10 +5674,10 @@ inline ScanData MakeSampleData() {
     d.usnStatus = "NTFS: OK | Journal: OK";
     d.usnDrive  = "C:\\ [NTFS] - Ativo | First Entry: 26/05/2026 23:58:27";
     d.sysmonStatus = "Loaded after boot";
-    // 32 synthetic events spanning IDs 1/6/7/8/10/13/22, 4 processes, two
-    // clusters at 14:02 and 14:47, and at least one trigger for each severity
-    // tier so the Triage view (histogram + offenders + sev coloring) is testable
-    // without a live Sysmon channel.
+
+
+
+
     auto E = [](const char* time, int id, const char* type,
                 const char* process, const char* detail,
                 const char* parent = "", const char* cmd = "",
@@ -5799,7 +5695,7 @@ inline ScanData MakeSampleData() {
         return e;
     };
     d.sysmonEvents = {
-        // 14:02 cluster — explorer routine
+
         E("14:02:08", 1, "Process Create", "C:\\Windows\\explorer.exe", "started",
           "C:\\Windows\\System32\\userinit.exe", "C:\\Windows\\explorer.exe", "DESKTOP\\iago"),
         E("14:02:11", 7, "Image Loaded", "C:\\Windows\\explorer.exe", "shell32.dll",
@@ -5812,7 +5708,7 @@ inline ScanData MakeSampleData() {
           "", "", "", "", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"),
         E("14:02:48", 1, "Process Create", "C:\\Windows\\System32\\notepad.exe", "spawned",
           "C:\\Windows\\explorer.exe", "notepad.exe", "DESKTOP\\iago"),
-        // 14:47 spike — cheat.exe + powershell suspicious
+
         E("14:47:02", 1, "Process Create", "C:\\Users\\iago\\Downloads\\cheat.exe", "spawned",
           "C:\\Windows\\explorer.exe", "cheat.exe --inject", "DESKTOP\\iago"),
         E("14:47:03", 7, "Image Loaded", "C:\\Users\\iago\\Downloads\\cheat.exe", "rare runtime",
@@ -5859,7 +5755,7 @@ inline ScanData MakeSampleData() {
           "", "", "", "", "", "", "C:\\Users\\iago\\Downloads\\cheat.exe",
           "C:\\Windows\\System32\\lsass.exe", "0x1FFFFF",
           "C:\\Windows\\System32\\ntdll.dll+0x9d1e4|UNKNOWN(0x4080)"),
-        // Mid-range chatter to give the histogram texture
+
         E("14:18:02", 7, "Image Loaded", "C:\\Windows\\System32\\svchost.exe", "iphlpapi.dll",
           "", "", "", "C:\\Windows\\System32\\iphlpapi.dll"),
         E("14:25:11", 22, "DNS Query", "C:\\Program Files\\Mozilla Firefox\\firefox.exe", "cdn lookup",

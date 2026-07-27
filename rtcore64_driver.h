@@ -9,7 +9,7 @@ struct RTCoreMemRange {
 struct HiddenEprocessFinding {
     DWORD pid;
     std::string imageFileName;
-    uintptr_t eprocessVirtual; 
+    uintptr_t eprocessVirtual;
     uint64_t eprocessPhysical;
     std::string reason;
 };

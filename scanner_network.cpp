@@ -1,9 +1,5 @@
-// Remote-port listener detector (anti-panel-remoto).
-// Layered defense: enumerate sockets → canonicalize path → path-mimicry →
-// trust pin by root thumbprint → interpreter unwrap (PEB read) → SCM map
-// for svchost family → parent chain → firewall + tunnel cross-check → classify.
 
-// Winsock2 must be visible before windows.h (pulled in by scanner_core.h).
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -30,25 +26,10 @@
 
 namespace {
 
-// ─── Pinned root CA thumbprints (SHA-1, lowercase as GetSignerRootThumbprint returns) ───
-// Microsoft Root Certificate Authority 2010 (signs most modern Windows binaries).
 constexpr const char* kMsRoot2010 = "3b1efd3a66ea28b16697394703a72ca340a05bd5";
-// Microsoft Root Certificate Authority 2011.
+
 constexpr const char* kMsRoot2011 = "8f43288ad272f3103b6fb1428485ea3014c0bcfe";
 
-// ─── Catalog hash lookup ────────────────────────────────────────────────
-// Direct query against the Windows Security Catalog Database. Returns true
-// when the file's cryptographic hash is registered in any installed catalog,
-// meaning Windows itself vouches for these exact bytes. Survives revocation-
-// cache failures that break WinVerifyTrust's catalog provider (the root cause
-// of spoolsv.exe appearing UNSIGNED on PCs with stale CRL state).
-//
-// Path-agnostic by design: the lookup key is the file hash, not the location.
-// An attacker copying a legitimate binary to a malicious path can not benefit,
-// because Rule 1 (mimicry) rejects system-binary basenames outside System32
-// BEFORE this check runs. An attacker shipping different bytes can not benefit
-// either, because the catalog is Microsoft-signed and only Microsoft hashes
-// land there.
 bool IsCatalogHashSigned(const std::wstring& path) {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -81,7 +62,7 @@ bool IsCatalogHashSigned(const std::wstring& path) {
     bool ok = tryAlgo(BCRYPT_SHA256_ALGORITHM);
     if (!ok) {
         SetFilePointer(hFile, 0, nullptr, FILE_BEGIN);
-        ok = tryAlgo(BCRYPT_SHA1_ALGORITHM); // legacy catalogs
+        ok = tryAlgo(BCRYPT_SHA1_ALGORITHM);
     }
     CloseHandle(hFile);
     return ok;
@@ -105,7 +86,6 @@ bool IsCatalogHashSignedCached(const std::wstring& path) {
     return r;
 }
 
-// ─── Port classifications ───────────────────────────────────────────────
 bool IsPanelPort(uint16_t port) {
     static const uint16_t kPanel[] = {1337, 3000, 4444, 5000, 5173, 6666, 6969, 7777,
                                        8000, 8080, 8081, 8888, 9000, 9090, 31337};
@@ -119,7 +99,6 @@ bool IsNoiseProtocolPort(uint16_t port) {
     return false;
 }
 
-// ─── String helpers ─────────────────────────────────────────────────────
 std::wstring ToUpperW(std::wstring s) {
     for (auto& c : s) c = (wchar_t)towupper((wint_t)c);
     return s;
@@ -142,7 +121,6 @@ std::wstring BaseNameUp(const std::wstring& path) {
     return ToUpperW(name);
 }
 
-// ─── Basename categories ────────────────────────────────────────────────
 bool IsInterpreterBasenameW(const std::wstring& up) {
     static const wchar_t* kList[] = {
         L"PYTHON.EXE", L"PYTHONW.EXE", L"NODE.EXE", L"RUBY.EXE", L"PERL.EXE",
@@ -176,11 +154,10 @@ bool IsTunnelBasenameW(const std::wstring& up) {
     return false;
 }
 
-// ─── Path classification ────────────────────────────────────────────────
 std::string DetectPathMimicry(const std::wstring& path, const std::wstring& baseUp) {
     if (path.empty() || baseUp.empty()) return {};
 
-    // Homoglyph / non-ASCII / RTL override / trailing whitespace.
+
     for (wchar_t c : baseUp) {
         if (c > 0x7F) return "homoglyph or non-ASCII in basename";
         if (c == 0x202E) return "RTL override character in basename";
@@ -192,7 +169,7 @@ std::string DetectPathMimicry(const std::wstring& path, const std::wstring& base
             return "trailing whitespace before extension";
     }
 
-    // System basename outside canonical dirs.
+
     if (IsSystemImpersonationTarget(baseUp)) {
         auto sep = path.find_last_of(L"\\/");
         std::wstring dirUp = (sep == std::wstring::npos)
@@ -211,7 +188,7 @@ std::string DetectPathMimicry(const std::wstring& path, const std::wstring& base
                    ToUtf8(dirUp) + ")";
     }
 
-    // Fake System32 nested inside user-writable tree.
+
     {
         std::wstring up = ToUpperW(path);
         bool inUserOrAppData =
@@ -238,8 +215,6 @@ bool IsUserWritablePath(const std::wstring& path) {
     return false;
 }
 
-// ─── PEB read for remote command line (anti-interpreter-impersonation) ──
-// x64-only offsets. The project is x64-only per build documentation.
 struct ProcessBasicInfoX64 {
     PVOID     Reserved1;
     PVOID     PebBaseAddress;
@@ -259,7 +234,7 @@ bool ReadRemoteCommandLine(DWORD pid, std::wstring& out) {
 
     ProcessBasicInfoX64 pbi{};
     ULONG retLen = 0;
-    if (pNtQip(h, 0 /* ProcessBasicInformation */,
+    if (pNtQip(h, 0 ,
                &pbi, sizeof(pbi), &retLen) != 0 || !pbi.PebBaseAddress) {
         CloseHandle(h);
         return false;
@@ -267,17 +242,17 @@ bool ReadRemoteCommandLine(DWORD pid, std::wstring& out) {
 
     PVOID userParams = nullptr;
     SIZE_T br = 0;
-    // PEB.ProcessParameters at offset 0x20 on x64.
+
     if (!ReadProcessMemory(h, (BYTE*)pbi.PebBaseAddress + 0x20,
                            &userParams, sizeof(userParams), &br) || !userParams) {
         CloseHandle(h);
         return false;
     }
 
-    // RTL_USER_PROCESS_PARAMETERS.CommandLine (UNICODE_STRING) at 0x70 on x64:
-    //   USHORT Length      @ +0x70
-    //   USHORT MaximumLen  @ +0x72
-    //   PWSTR  Buffer      @ +0x78 (after 4-byte padding)
+
+
+
+
     USHORT cmdLen = 0;
     PVOID  cmdBuf = nullptr;
     if (!ReadProcessMemory(h, (BYTE*)userParams + 0x70,
@@ -298,7 +273,6 @@ bool ReadRemoteCommandLine(DWORD pid, std::wstring& out) {
     return true;
 }
 
-// Parse the first non-flag argument that looks like a script/module file.
 std::wstring ParseInterpreterScript(const std::wstring& cmdline) {
     auto skipSpaces = [](const std::wstring& s, size_t i) {
         while (i < s.size() && (s[i] == L' ' || s[i] == L'\t')) ++i;
@@ -319,7 +293,7 @@ std::wstring ParseInterpreterScript(const std::wstring& cmdline) {
 
     size_t i = 0;
     i = skipSpaces(cmdline, i);
-    (void)nextToken(cmdline, i); // skip interpreter exe
+    (void)nextToken(cmdline, i);
 
     while (i < cmdline.size()) {
         i = skipSpaces(cmdline, i);
@@ -327,7 +301,7 @@ std::wstring ParseInterpreterScript(const std::wstring& cmdline) {
         std::wstring tok = nextToken(cmdline, i);
         if (tok.empty()) continue;
         if (tok[0] == L'-' || tok[0] == L'/') continue;
-        auto comma = tok.find(L','); // rundll32 "path,Entry"
+        auto comma = tok.find(L',');
         if (comma != std::wstring::npos) tok = tok.substr(0, comma);
         return tok;
     }
@@ -348,7 +322,6 @@ bool CmdlineContainsListener(const std::wstring& cmd) {
     return false;
 }
 
-// ─── Process snapshot + parent chain ────────────────────────────────────
 std::unordered_map<DWORD, std::pair<DWORD, std::wstring>> SnapshotProcesses() {
     std::unordered_map<DWORD, std::pair<DWORD, std::wstring>> out;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -388,7 +361,6 @@ std::string FindRunningTunnel(const std::unordered_map<DWORD, std::pair<DWORD, s
     return {};
 }
 
-// ─── SCM lookup: PID → service host name(s) ─────────────────────────────
 std::unordered_map<DWORD, std::string> BuildSvchostPidToServiceMap(std::string& note) {
     std::unordered_map<DWORD, std::string> out;
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
@@ -420,7 +392,6 @@ std::unordered_map<DWORD, std::string> BuildSvchostPidToServiceMap(std::string& 
     return out;
 }
 
-// ─── Firewall: map { uppercase exe path → rule label } for enabled inbound allows ──
 std::unordered_map<std::wstring, std::string>
 BuildFirewallInboundAllowMap(std::string& note) {
     std::unordered_map<std::wstring, std::string> out;
@@ -495,7 +466,6 @@ BuildFirewallInboundAllowMap(std::string& note) {
     return out;
 }
 
-// ─── Path resolution ────────────────────────────────────────────────────
 std::wstring CanonicalizeFinalPath(DWORD pid) {
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return {};
@@ -509,9 +479,8 @@ std::wstring CanonicalizeFinalPath(DWORD pid) {
     return std::wstring(buf, len);
 }
 
-// ─── Address formatting ─────────────────────────────────────────────────
 bool IsLoopbackV4(DWORD net) {
-    // 127.0.0.0/8 — first byte in network order.
+
     return (net & 0xFFu) == 127u;
 }
 bool IsAnyV4(DWORD net) { return net == 0; }
@@ -538,7 +507,6 @@ std::string FormatV6(const IN6_ADDR& a) {
     return buf;
 }
 
-// ─── Listener record ────────────────────────────────────────────────────
 struct Listener {
     std::string protocol;
     uint16_t    port;
@@ -638,9 +606,8 @@ void EnumUdpV6(std::vector<Listener>& out) {
     }
 }
 
-} // anonymous namespace
+}
 
-// ─── Public entry point ─────────────────────────────────────────────────
 std::vector<ScannerUI::RemotePortFinding>
 CollectRemotePortFindings(std::string& status) {
     std::vector<ScannerUI::RemotePortFinding> findings;
@@ -671,7 +638,7 @@ CollectRemotePortFindings(std::string& status) {
     for (const auto& L : listeners) {
         if (L.pid == 0 || L.pid == 4) continue;
 
-        // UDP is noisy. Only consider UDP entries on panel-range ports.
+
         if ((L.protocol == "UDP" || L.protocol == "UDP6") && !IsPanelPort(L.port))
             continue;
 
@@ -692,14 +659,14 @@ CollectRemotePortFindings(std::string& status) {
                                 baseUp == L"TASKHOSTW.EXE"    ||
                                 baseUp == L"RUNDLL32.EXE");
 
-        // Skip well-known noise protocol ports owned by a registered service host.
+
         if (IsNoiseProtocolPort(L.port) && isSvchostFamily && svcMap.count(L.pid))
             continue;
 
-        // Layer 1: path mimicry — instant HIGH if matched.
+
         std::string mimicryReason = DetectPathMimicry(fullPath, baseUp);
 
-        // Authenticode + root thumbprint.
+
         DetectionFilter::VerifiedSignerIdentity ident =
             DetectionFilter::GetVerifiedSignerIdentityCached(fullPath);
 
@@ -720,17 +687,17 @@ CollectRemotePortFindings(std::string& status) {
             signerLabel = "UNSIGNED";
         }
 
-        // Cryptographic trust composition. Both paths are pure-signature:
-        //   ident.trusted  — WinVerifyTrust (embedded or catalog) end-to-end OK.
-        //   catalogSigned  — file hash present in Windows Catalog Database
-        //                    (raw lookup, survives revocation-cache failures).
-        // No path / name / folder / size heuristic participates in this gate.
+
+
+
+
+
         bool catalogSigned  = IsCatalogHashSignedCached(fullPath);
         bool effectiveTrust = ident.trusted || catalogSigned;
         if (!ident.trusted && catalogSigned)
             signerLabel = "SIGNED [CATALOG-HASH]";
 
-        // Layer 2: SCM check for svchost family.
+
         std::string svcHost;
         bool svchostMissingService = false;
         if (isSvchostFamily) {
@@ -742,7 +709,7 @@ CollectRemotePortFindings(std::string& status) {
             }
         }
 
-        // Layer 3: interpreter unwrap.
+
         std::wstring cmdline;
         std::wstring scriptPath;
         bool inlineLolbin       = false;
@@ -767,10 +734,10 @@ CollectRemotePortFindings(std::string& status) {
             }
         }
 
-        // Layer 4: parent chain.
+
         std::string parentChain = BuildParentChain(L.pid, procSnap);
 
-        // Layer 5: firewall / tunnel.
+
         std::string fwRule;
         {
             auto it = fwMap.find(ToUpperW(fullPath));
@@ -791,7 +758,7 @@ CollectRemotePortFindings(std::string& status) {
             scriptOrHost = "<unreadable cmdline>";
         }
 
-        // ── CLASSIFICATION (first match wins) ──────────────────────────
+
         std::string severity;
         std::string reason;
         auto setIf = [&](const char* sev, std::string why) {
@@ -883,12 +850,6 @@ CollectRemotePortFindings(std::string& status) {
     return findings;
 }
 
-// ─── WFP stream/datagram callout detection ──────────────────────────────────
-// Enumerates callouts registered at TCP stream and UDP datagram layers via the
-// WFP management API. A callout at FWPM_LAYER_STREAM_V4/V6 has the ability to
-// inspect, modify, inject into, or truncate TCP stream data — the primary
-// mechanism used by kernel-level cheats to interfere with anti-cheat traffic.
-
 static std::string GuidToHexStr(const GUID& g) {
     char buf[40];
     snprintf(buf, sizeof(buf),
@@ -951,9 +912,9 @@ static std::wstring ResolveWfpServiceDriverPath(const std::wstring& serviceName)
         else if (driverPath.rfind(L"\\??\\", 0) == 0)
             driverPath = driverPath.substr(4);
 
-        // Service ImagePath values commonly include arguments (for example,
-        // svchost.exe -k LocalServiceNoNetworkFirewall). Verify the executable,
-        // not the complete command line.
+
+
+
         while (!driverPath.empty() && iswspace(driverPath.front()))
             driverPath.erase(driverPath.begin());
         if (!driverPath.empty() && driverPath.front() == L'"') {
@@ -1371,8 +1332,8 @@ CollectWfpStreamFilterFindings(std::string& status) {
                     confidence = "LOW";
                     evidenceState = "INCONCLUSIVE";
                 } else if (trusted && !microsoft) {
-                    // Signed VPN, endpoint-security and firewall filters are normal
-                    // inventory, not bypass evidence.
+
+
                     FwpmFreeMemory0(reinterpret_cast<void**>(&callout));
                     continue;
                 } else {

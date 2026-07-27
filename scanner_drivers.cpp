@@ -4,9 +4,6 @@
 #pragma comment(lib, "imagehlp.lib")
 #pragma comment(lib, "version.lib")
 
-
-
-
 static std::wstring NormalizeDosDriverPath(const std::wstring& raw) {
     std::wstring path = raw;
     while (!path.empty() && (path.front() == L' ' || path.front() == L'\t'))
@@ -63,9 +60,6 @@ static std::wstring ExtractDriverImagePath(std::wstring value) {
     return firstSpace == std::wstring::npos ? value : value.substr(0, firstSpace);
 }
 
-// Checks if `token` appears as a whole word in `upper` (surrounded by non-alphanumeric
-// or at string boundaries). Prevents false positives from common substrings like
-// PHYS in PHYSX, HOOK in SHOOK, SHADOW in SHADOWCOPY, MAPPER in REMAPPER.
 static bool TokenMatchesWhole(const std::wstring& upper, const std::wstring& token) {
     size_t pos = upper.find(token);
     while (pos != std::wstring::npos) {
@@ -78,8 +72,8 @@ static bool TokenMatchesWhole(const std::wstring& upper, const std::wstring& tok
 }
 
 static bool HasDriverSuspiciousToken(const std::wstring& name) {
-    // These tokens are rare enough that substring match is safe — they almost
-    // never appear in legitimate driver names.
+
+
     static const wchar_t* kSubstringTokens[] = {
         L"CHEAT", L"BYPASS", L"HACK", L"RING0",
         L"ROOTKIT", L"BLACKLOTUS",
@@ -88,7 +82,7 @@ static bool HasDriverSuspiciousToken(const std::wstring& name) {
         L"EXPLOIT", L"HOLLOW", L"MANUALMAP", L"KMAP",
         nullptr
     };
-    // These tokens can appear inside legitimate driver names, so require whole-word match.
+
     static const wchar_t* kWholeWordTokens[] = {
         L"HOOK", L"INJECT", L"SPOOF", L"HWID", L"MAPPER",
         L"GHOST", L"PHANTOM", L"SHADOW",
@@ -98,7 +92,7 @@ static bool HasDriverSuspiciousToken(const std::wstring& name) {
         nullptr
     };
     std::wstring up = ToUpperInvariant(name);
-    // Strip extension before word-boundary checks so FOO.SYS stem is "FOO"
+
     std::wstring stem = up;
     size_t dot = stem.find_last_of(L'.');
     if (dot != std::wstring::npos) stem = stem.substr(0, dot);
@@ -128,7 +122,7 @@ static bool IsKnownAbusedDriverName(const std::wstring& name) {
         L"AMIFLDRV64.SYS", L"AMIFLDRV32.SYS",
         L"INPOUTX64.SYS", L"INPOUT32.SYS",
         L"CPUZ141_X64.SYS", L"CPUZ143_X64.SYS", L"CPUZ144_X64.SYS",
-        // 2023-2025 additions
+
         L"ZAM64.SYS", L"ZAMGUARD64.SYS",
         L"ASWARPOT.SYS", L"ASWVMM.SYS",
         L"MHYPROT.SYS", L"MHYPROT2.SYS",
@@ -190,8 +184,6 @@ static const char* DriverPathClassName(const std::wstring& path) {
     default:                                          return "unknown";
     }
 }
-
-
 
 static std::string HexValue(ULONGLONG value) {
     std::ostringstream oss;
@@ -298,7 +290,6 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
     std::unordered_set<std::wstring> loadedNames;
     const auto lifecycleEvidence = CollectDriverLifecycleEvidence();
 
-
     LPVOID addrs[4096] = {};
     DWORD cbNeeded = 0;
     if (!EnumDeviceDrivers(addrs, sizeof(addrs), &cbNeeded)) {
@@ -329,10 +320,8 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
         bool abusedName     = IsKnownAbusedDriverName(base);
         bool suspiciousName = HasDriverSuspiciousToken(base) || abusedName;
 
-
         if (signedOk && systemPath && !suspiciousName)
             continue;
-
 
         if (signedOk && trustedPath && !suspiciousName && !suspiciousPath)
             continue;
@@ -371,7 +360,6 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
         f.detail = detail;
         findings.push_back(f);
     }
-
 
     HKEY svcRoot = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -519,7 +507,6 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
     return findings;
 }
 
-// Forward declarations needed by CollectKernelAnomalies (defined further below)
 struct LoadedKernelModuleInfo {
     uintptr_t base = 0;
     ULONG imageSize = 0;
@@ -529,7 +516,6 @@ struct LoadedKernelModuleInfo {
 static std::unordered_map<std::wstring, LoadedKernelModuleInfo>
 CollectLoadedKernelModuleMap(std::unordered_map<std::wstring, int>& basenameCounts);
 
-// Reads only the PE optional header to extract SizeOfImage (fast, no full-file read)
 static DWORD ReadDiskSizeOfImage(const std::wstring& path) {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
                                FILE_SHARE_READ | FILE_SHARE_DELETE,
@@ -557,7 +543,6 @@ static DWORD ReadDiskSizeOfImage(const std::wstring& path) {
     return 0;
 }
 
-// Lightweight kernel anomaly scan for pg1: phantom modules, hollowing indicators, BYOVD carriers.
 std::vector<ScannerUI::KernelAnomalyFinding> CollectKernelAnomalies(std::string& status) {
     static constexpr const char* kTagMapper   = "MAPPER";
     static constexpr const char* kTagHollowing = "HOLLOWING";
@@ -581,7 +566,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> CollectKernelAnomalies(std::string&
     for (const auto& kv : moduleMap) knownBases.insert(kv.second.base);
     std::unordered_set<uintptr_t> flagged;
 
-    // Phantom module check
+
     for (LPVOID basePtr : bases) {
         uintptr_t base = reinterpret_cast<uintptr_t>(basePtr);
         if (!base || base < 0xFFFF800000000000ULL) continue;
@@ -610,7 +595,7 @@ std::vector<ScannerUI::KernelAnomalyFinding> CollectKernelAnomalies(std::string&
         status = "DETECTED";
     }
 
-    // Per-module checks: BYOVD, suspicious name, hollowing
+
     for (const auto& kv : moduleMap) {
         const LoadedKernelModuleInfo& mod = kv.second;
         if (flagged.count(mod.base)) continue;
@@ -691,8 +676,6 @@ std::vector<ScannerUI::KernelAnomalyFinding> CollectKernelAnomalies(std::string&
     });
     return findings;
 }
-
-
 
 static std::string ComputeDriverSha256(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
@@ -778,11 +761,6 @@ static void DowngradeDriverFinding(ScannerUI::DriverIntegrityFinding& f,
     f.suspicious = suspicious;
 }
 
-// Memoizes the single most recently read driver file. CollectDriverIntegrityFindings
-// calls this (directly or via FindHookedExports/DetectPEOverlay) several times in a
-// row for the SAME path while analyzing one driver before moving to the next, so a
-// 1-entry cache turns up to ~6 disk reads per driver into 1 without changing any
-// caller's signature or behavior for a given path.
 static bool ReadWholeDriverFile(const std::wstring& path, std::vector<uint8_t>& file) {
     static std::wstring s_cachedPath;
     static std::vector<uint8_t> s_cachedBuffer;
@@ -901,8 +879,6 @@ static bool IsTrustedDriverPublisher(const std::wstring& signer, const DriverVer
     });
 }
 
-// Returns true when the finding has at least one independent structural signal
-// of driver manipulation — used to gate callback escalation to HIGH.
 static bool HasManipulationEvidence(const ScannerUI::DriverIntegrityFinding& f,
                                     const std::vector<std::string>& anomalyTokens) {
     if (f.hasHooks)    return true;
@@ -949,9 +925,9 @@ static bool HasWeakOnlyAnomalies(const std::vector<std::string>& anomalies) {
         "stripped-binary-pattern",
         "code-integrity-event",
         "memory-size-diff-trusted",
-        // "no-rich-header" is intentionally excluded: GCC, Clang, Rust, and LLVM
-        // do not emit a Rich header, so legitimate third-party drivers routinely
-        // lack it. Treating it as strong evidence caused too many false positives.
+
+
+
     };
     for (const auto& a : anomalies)
         if (kStrong.find(a) != kStrong.end())
@@ -1053,12 +1029,12 @@ struct DriverPeAnomalyInfo {
     bool noImportTable = false;
     DWORD sizeOfImage = 0;
     std::string summary;
-    // P3 additions
+
     bool missingRichHeader        = false;
     bool nonStandardAlignment     = false;
-    bool codeEntropySpike         = false;  // .text entropy > 7.2
-    bool virtualRawRatioAnomalous = false;  // VirtualSize > RawSize*8
-    bool stringObfuscation        = false;  // < 8 readable strings in .text > 10KB
+    bool codeEntropySpike         = false;
+    bool virtualRawRatioAnomalous = false;
+    bool stringObfuscation        = false;
 };
 
 static DriverPeAnomalyInfo AnalyzeDriverPeShape(const std::wstring& path) {
@@ -1125,18 +1101,18 @@ static DriverPeAnomalyInfo AnalyzeDriverPeShape(const std::wstring& path) {
         }
     }
 
-    // P3 — Rich header detection (MSVC linker artifact)
+
     info.missingRichHeader = !HasRichHeaderLocal(base, sz);
 
-    // P3 — FileAlignment: 0x200 and 0x1000 are MSVC defaults, but MinGW, WDK
-    // older versions, and LLVM-based toolchains legitimately produce 0x400/0x800.
+
+
     DWORD fileAlign = is64
         ? reinterpret_cast<const IMAGE_OPTIONAL_HEADER64*>(base + optOff)->FileAlignment
         : reinterpret_cast<const IMAGE_OPTIONAL_HEADER32*>(base + optOff)->FileAlignment;
     info.nonStandardAlignment = (fileAlign != 0x200 && fileAlign != 0x400 &&
                                   fileAlign != 0x800 && fileAlign != 0x1000);
 
-    // P3 — Per-section analysis: entropy spike, virtual/raw ratio, string obfuscation
+
     {
         size_t secTableOff2 = optOff + fh->SizeOfOptionalHeader;
         for (WORD s = 0; s < fh->NumberOfSections && s < 96; ++s) {
@@ -1148,24 +1124,24 @@ static DriverPeAnomalyInfo AnalyzeDriverPeShape(const std::wstring& path) {
             DWORD rawSize = sh2->SizeOfRawData;
             DWORD virtSize = sh2->Misc.VirtualSize;
 
-            // Virtual/raw ratio anomaly: indicates unpacking stub.
-            // Guard rawSize > 4096 to skip .bss-only sections (zero-init data with
-            // VirtualSize >> RawSize is normal for AV, filesystem, and storage drivers).
-            // Multiplier raised to 32 to avoid false positives on legitimate sparse sections.
+
+
+
+
             if (rawSize > 4096 && virtSize > rawSize * 32)
                 info.virtualRawRatioAnomalous = true;
 
             if (rawPtr > 0 && rawSize > 0 && (size_t)rawPtr + rawSize <= sz) {
                 const uint8_t* secData = base + rawPtr;
-                // Section entropy spike in code sections
+
                 if (isCode && rawSize > 0) {
                     double ent = DetectionFilter::ShannonEntropy(secData, rawSize < 256*1024 ? rawSize : 256*1024);
                     if (ent > DetectionFilter::kPackedEntropy)
                         info.codeEntropySpike = true;
                 }
-                // String obfuscation: code section > 32KB with < 4 readable strings.
-                // Thresholds raised (from 10KB/8 strings) because optimized C/Assembly
-                // routinely produces dense code sections with very few embedded strings.
+
+
+
                 if (isCode && rawSize > 32 * 1024 && !info.stringObfuscation) {
                     int strCount = CountReadableStringsLocal(secData, rawSize < 512*1024 ? rawSize : 512*1024);
                     if (strCount < 4)
@@ -1310,8 +1286,8 @@ static std::vector<std::string> FindImportedKernelCallbacks(const std::wstring& 
         }
     }
 
-    // Scan bruto de strings no binário para detectar resolução dinâmica de callbacks
-    // (drivers que usam MmGetSystemRoutineAddress sem importar diretamente)
+
+
     static const struct { const char* name; const char* label; } kDynCallbacks[] = {
         { "PsSetCreateProcessNotifyRoutine",   "process-callback" },
         { "PsSetCreateThreadNotifyRoutine",    "thread-callback" },
@@ -1342,8 +1318,8 @@ static std::vector<std::string> FindImportedKernelCallbacks(const std::wstring& 
 static void EnrichWithRuntimeMinifilters(
     std::unordered_map<std::wstring, std::string>& callbackExtra)
 {
-    // FILTER_FULL_INFORMATION layout (WDK, FilterFullInformation = 0)
-    // Declarado localmente para não depender de fltuser.h
+
+
     struct FltFullInfo {
         ULONG  NextEntryOffset;
         ULONG  NumberOfInstances;
@@ -1354,7 +1330,7 @@ static void EnrichWithRuntimeMinifilters(
     HMODULE hFlt = LoadLibraryW(L"fltLib.dll");
     if (!hFlt) return;
 
-    // Função pointer com cast direto para evitar typedefs em scope global
+
     FARPROC rawFindFirst = GetProcAddress(hFlt, "FilterFindFirst");
     FARPROC rawFindNext  = GetProcAddress(hFlt, "FilterFindNext");
     FARPROC rawFindClose = GetProcAddress(hFlt, "FilterFindClose");
@@ -1363,8 +1339,8 @@ static void EnrichWithRuntimeMinifilters(
         return;
     }
 
-    // Typedefs locais necessários: MSVC não parseia calling convention dentro de
-    // template angle brackets (reinterpret_cast<HRESULT(WINAPI*)(...)> causa C2059/C2143).
+
+
     typedef HRESULT (WINAPI *FnFilterFindFirst)(DWORD, LPVOID, DWORD, LPDWORD, LPHANDLE);
     typedef HRESULT (WINAPI *FnFilterFindNext) (HANDLE, DWORD, LPVOID, DWORD, LPDWORD);
     typedef HRESULT (WINAPI *FnFilterFindClose)(HANDLE);
@@ -1372,7 +1348,7 @@ static void EnrichWithRuntimeMinifilters(
     std::vector<BYTE> buf(4096);
     DWORD returned = 0;
     HANDLE hFind = INVALID_HANDLE_VALUE;
-    // FilterFullInformation = 0 (primeiro valor do enum FILTER_INFORMATION_CLASS)
+
     HRESULT hr = reinterpret_cast<FnFilterFindFirst>(rawFindFirst)
                      (0, buf.data(), (DWORD)buf.size(), &returned, &hFind);
 
@@ -1671,7 +1647,6 @@ static std::unordered_map<std::wstring, std::string> CollectDriverEventEvidenceM
     return evidence;
 }
 
-
 static std::wstring GetDriverSignerName(const std::wstring& path) {
     HCERTSTORE hStore = nullptr; HCRYPTMSG hMsg = nullptr;
     DWORD enc = 0, ct = 0, ft = 0;
@@ -1699,8 +1674,6 @@ static std::wstring GetDriverSignerName(const std::wstring& path) {
     CertCloseStore(hStore, 0); CryptMsgClose(hMsg);
     return name;
 }
-
-
 
 static std::vector<std::wstring> FindWinSxSReferences(const std::wstring& path) {
     std::wstring name = DriverBaseName(path);
@@ -1733,7 +1706,6 @@ static std::vector<std::wstring> FindWinSxSReferences(const std::wstring& path) 
     return results;
 }
 
-
 static bool VerifyDriverCatalog(const std::wstring& path, bool& catalogFound) {
     catalogFound = false;
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
@@ -1759,19 +1731,16 @@ static bool VerifyDriverCatalog(const std::wstring& path, bool& catalogFound) {
     return ok;
 }
 
-
 static bool HasInlineHookSignature(const uint8_t* b, size_t len) {
     if (len < 2) return false;
     if (b[0] == 0xE9) return true;
     if (b[0] == 0xEB) return true;
-
 
     if (len >= 12 && b[0] == 0x48 && b[1] == 0xB8 &&
         b[10] == 0xFF && (b[11] == 0xE0 || b[11] == 0xD0)) return true;
     if (len >= 6  && b[0] == 0x68 && b[5] == 0xC3) return true;
     return false;
 }
-
 
 static std::vector<std::string> FindHookedExports(
     const std::wstring& path,
@@ -1841,8 +1810,6 @@ static std::vector<std::string> FindHookedExports(
     return hooked;
 }
 
-
-
 static bool VerifyPEChecksum(const std::wstring& path) {
     DWORD headerSum = 0, checkSum = 0;
     DWORD rc = MapFileAndCheckSumW(path.c_str(), &headerSum, &checkSum);
@@ -1850,8 +1817,6 @@ static bool VerifyPEChecksum(const std::wstring& path) {
     if (headerSum == 0) return true;
     return headerSum == checkSum;
 }
-
-
 
 static bool DetectPEOverlay(const std::wstring& path) {
     std::vector<uint8_t> file;
@@ -1895,12 +1860,9 @@ static bool DetectPEOverlay(const std::wstring& path) {
     return fileSize > trustedEnd + 512;
 }
 
-
 static bool IsMicrosoftSigner(const std::wstring& signerName) {
     return ToUpperInvariant(signerName).find(L"MICROSOFT") != std::wstring::npos;
 }
-
-
 
 static bool IsKnownSystemDriverName(const std::wstring& upperName) {
     static const wchar_t* kNames[] = {
@@ -1934,12 +1896,12 @@ static bool LooksLikeSystemDriverMasquerade(const std::wstring& upperName) {
         base = base.substr(0, dot);
     static const wchar_t* kCriticalStems[] = {
         L"NTOSKRNL", L"NTKRNL", L"WIN32K", L"FLTMGR", L"TCPIP", L"DXGKRNL",
-        L"HAL",      // hal.dll — hardware abstraction layer
-        L"CLASSPNP", // classpnp.sys — PnP class driver
-        L"KSECDD",   // ksecdd.sys — kernel security support provider
-        L"NDIS",     // ndis.sys — network driver interface spec
-        L"NETIO",    // netio.sys — network I/O subsystem
-        L"CNG",      // cng.sys — kernel cryptography next generation
+        L"HAL",
+        L"CLASSPNP",
+        L"KSECDD",
+        L"NDIS",
+        L"NETIO",
+        L"CNG",
         nullptr
     };
     for (int i = 0; kCriticalStems[i]; ++i) {
@@ -2084,7 +2046,7 @@ static int ComputeDriverMaliciousScore(
     int score = 0;
     if (!signedOk && !catalogOk) {
         if (crashDumpDriver) {
-            // Crash dump drivers are unsigned by design — minimal penalty only
+
             score += 5;
         } else {
             score += 40;
@@ -2095,7 +2057,7 @@ static int ComputeDriverMaliciousScore(
     if (byovdName)   score += 30;
     if (hasHooks)    score += 40;
     if (hasCallbacks && !signedOk && !catalogOk && !crashDumpDriver) score += 20;
-    // Crash dump drivers have no persistent backing file — that's expected
+
     if (diskFileMissing && !crashDumpDriver)  score += 25;
     if (noService && !systemPath && !signedOk && !crashDumpDriver) score += 15;
     if (bootStart && !signedOk)                  score += 20;
@@ -2110,22 +2072,17 @@ static int ComputeDriverMaliciousScore(
     return std::max(0, score);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P1 — Certificate deep analysis
-// ─────────────────────────────────────────────────────────────────────────────
-
 struct CertDeepResult {
     bool hasCert         = false;
     bool selfSigned      = false;
-    bool ekuMismatch     = false;  // no code-signing OID
-    bool homoglyphCn     = false;  // CN contains non-ASCII chars
-    bool serialDuplicate = false;  // same serial seen on another file this scan
+    bool ekuMismatch     = false;
+    bool homoglyphCn     = false;
+    bool serialDuplicate = false;
     int  chainDepth      = 0;
     std::string serial;
     std::string issuerCN;
 };
 
-// Maintained across the whole scan to detect cloned certs
 static std::unordered_map<std::string, std::wstring>& GetCertSerialMap() {
     static std::unordered_map<std::string, std::wstring> m;
     return m;
@@ -2173,18 +2130,18 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
     if (leafCtx) {
         result.hasCert = true;
 
-        // Serial number
+
         result.serial = BinToHex(
             leafCtx->pCertInfo->SerialNumber.pbData,
             leafCtx->pCertInfo->SerialNumber.cbData);
 
-        // Issuer CN
+
         wchar_t iname[512] = {};
         CertGetNameStringW(leafCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE,
                            CERT_NAME_ISSUER_FLAG, nullptr, iname, 512);
         result.issuerCN = WideToUtf8(iname);
 
-        // Subject CN for homoglyph check
+
         wchar_t sname[512] = {};
         CertGetNameStringW(leafCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE,
                            0, nullptr, sname, 512);
@@ -2195,13 +2152,13 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
             }
         }
 
-        // Self-signed: subject == issuer by name comparison
+
         result.selfSigned = CertCompareCertificateName(
             X509_ASN_ENCODING,
             &leafCtx->pCertInfo->Subject,
             &leafCtx->pCertInfo->Issuer) != FALSE;
 
-        // EKU — must contain szOID_PKIX_KP_CODE_SIGNING
+
         bool hasCodeSign = false;
         PCERT_EXTENSION ekuExt = CertFindExtension(
             szOID_ENHANCED_KEY_USAGE,
@@ -2215,8 +2172,8 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
                                 ekuExt->Value.cbData,
                                 CRYPT_DECODE_ALLOC_FLAG, nullptr,
                                 &usage_sz, &usage_sz);
-            // Simpler: just check raw bytes for the OID string
-            const char* oidStr = szOID_PKIX_KP_CODE_SIGNING; // "1.3.6.1.5.5.7.3.3"
+
+            const char* oidStr = szOID_PKIX_KP_CODE_SIGNING;
             size_t oidLen = strlen(oidStr);
             for (DWORD bi = 0; bi + oidLen <= ekuExt->Value.cbData; ++bi) {
                 if (memcmp(ekuExt->Value.pbData + bi, oidStr, oidLen) == 0) {
@@ -2227,7 +2184,7 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
         }
         result.ekuMismatch = !hasCodeSign;
 
-        // Build chain to get depth
+
         CERT_CHAIN_PARA chainPara = {};
         chainPara.cbSize = sizeof(chainPara);
         PCCERT_CHAIN_CONTEXT pChain = nullptr;
@@ -2244,7 +2201,7 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
     CertCloseStore(hStore, 0);
     CryptMsgClose(hMsg);
 
-    // Serial duplicate detection (accumulates across the scan call)
+
     if (!result.serial.empty()) {
         auto& serialMap = GetCertSerialMap();
         auto it = serialMap.find(result.serial);
@@ -2257,18 +2214,14 @@ static CertDeepResult AnalyzeCertificateDeep(const std::wstring& path) {
     return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P2 — Import table behavioral fingerprinting
-// ─────────────────────────────────────────────────────────────────────────────
-
 struct ImportBehaviorResult {
-    bool importInjectionCombo = false;  // ZwMapViewOfSection + NtWriteVirtualMemory
-    bool importDmaCombo       = false;  // MmMapIoSpace + MmAllocateContiguousMemory
-    bool importPhysMemAccess  = false;  // MmMapIoSpace alone
-    bool importIoctlSurface   = false;  // IoCreateSymbolicLink present
-    bool importCountSuspect   = false;  // 0 or 1 imports in a non-system driver
+    bool importInjectionCombo = false;
+    bool importDmaCombo       = false;
+    bool importPhysMemAccess  = false;
+    bool importIoctlSurface   = false;
+    bool importCountSuspect   = false;
     int  totalImports         = 0;
-    std::string impHash;  // normalized import fingerprint
+    std::string impHash;
 };
 
 static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
@@ -2295,7 +2248,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
     if (!is64 && !is32) return result;
     size_t secTbl = optOff + fh->SizeOfOptionalHeader;
 
-    // Re-use same rvaToOffset lambda pattern as FindImportedKernelCallbacks
+
     auto rvaToOffset = [&](DWORD rva) -> size_t {
         for (WORD s = 0; s < fh->NumberOfSections && s < 96; ++s) {
             size_t sOff = secTbl + (size_t)s * sizeof(IMAGE_SECTION_HEADER);
@@ -2332,7 +2285,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
     bool hasMmAllocateContiguousMemory  = false;
     bool hasIoCreateSymbolicLink        = false;
 
-    // Collect all import names for impHash
+
     std::vector<std::string> allImports;
 
     for (size_t i = 0; i < 512; ++i) {
@@ -2341,7 +2294,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
         auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + cur);
         if (!desc->OriginalFirstThunk && !desc->FirstThunk && !desc->Name) break;
 
-        // DLL name for impHash
+
         size_t dllNameOff = rvaToOffset(desc->Name);
         std::string dllName;
         if (dllNameOff != (size_t)-1 && dllNameOff < sz) {
@@ -2350,7 +2303,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
             size_t dlen = strnlen_s(dn, maxDll < 256 ? maxDll : 256);
             if (dlen > 0) {
                 dllName.assign(dn, dlen);
-                // strip .dll for impHash
+
                 if (dllName.size() > 4) {
                     std::string ext = dllName.substr(dllName.size() - 4);
                     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -2383,7 +2336,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
             std::string name(fname, flen);
             ++result.totalImports;
 
-            // For impHash: dllname!funcname
+
             if (!dllName.empty()) {
                 std::string fn = name;
                 std::transform(fn.begin(), fn.end(), fn.begin(), ::tolower);
@@ -2409,7 +2362,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
     result.importIoctlSurface   = hasIoCreateSymbolicLink;
     result.importCountSuspect   = (result.totalImports <= 1);
 
-    // Compute impHash: sorted, pipe-separated import list → SHA-256 truncated
+
     if (!allImports.empty()) {
         std::sort(allImports.begin(), allImports.end());
         std::string concat;
@@ -2417,7 +2370,7 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
             if (i) concat += '|';
             concat += allImports[i];
         }
-        // Use BCrypt SHA-256 (bcrypt.lib already linked)
+
         BCRYPT_ALG_HANDLE alg = nullptr;
         if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0) {
             DWORD objSz = 0, cbData = 0;
@@ -2444,39 +2397,34 @@ static ImportBehaviorResult AnalyzeImportBehavior(const std::wstring& path)
     return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P6 — BYOVD detection by SHA256 hash (rename-proof)
-// Source: loldrivers.io known hash list
-// ─────────────────────────────────────────────────────────────────────────────
-
 static bool IsKnownByovdHash(const std::string& sha256) {
-    // All lowercase SHA-256 hashes of confirmed vulnerable drivers
+
     static const std::unordered_set<std::string> kByovdHashes = {
-        // CAPCOM.SYS — arbitrary code exec in kernel context
+
         "a0751c6e8b9a5af2f3b45a2a5a0de8a6e4c3f2b1d9e7c6b5a4f3e2d1c0b9a8f7",
-        // DBUTIL_2_3.SYS — Dell DBUtil CVE-2021-21551
+
         "bb7b1e4e5fa11be5b7a14c68d4e12b89f98e73fd2b92c1ef84e7c39e29d8ad19",
-        // DBUTIL_2_5.SYS
+
         "0296e2ce999e67c76352e02b2e17a4e14b3a57dabc8be4408e3b91b8d1952b4e",
-        // RTCORE64.SYS — MSI Afterburner/RivaTuner CVE-2019-16098
+
         "01aa278b07b58dc46c84bd0b1b5c8e9ee4e62ea0bf7a695862444af32e87f1fd",
-        // GDRV.SYS — Gigabyte driver privilege escalation
+
         "31f4cfb4c71da44120752721103a16512444c13c2ac2d857a7e6f13cb679b427",
-        // WINRING0.SYS / WINRING0X64.SYS — OpenLibSys I/O ring0 driver
+
         "24a9027c1fb28ebc99e9e5e5a9bf78be38af35e91a6c97b4c6a3c1bd7ea05ec",
-        // IQVW64E.SYS — Intel NIC CVE-2015-2291
+
         "9f1e86f63d9d7d0eb2e2e57a50b51abe4c0cdbe3b78b5f2a5e68f9c64a0d1e42",
-        // MHYPROT2.SYS — miHoYo anti-cheat driver BYOVD abuse
+
         "5b5e80b1e62a52e51aecedb3d10f2e3df80af7f6f3d6a8e3c29c3e8b1a0f4b2c",
-        // PROCEXP152.SYS — Process Explorer driver
+
         "a3dce0f64c5028028e6e07e0c3b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
-        // ZAMGUARD64.SYS — Zemana Anti-Malware BYOVD
+
         "d6b7c8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7",
-        // ELRAWDSK.SYS — EldoS RawDisk
+
         "e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
-        // ENE.SYS / ENEIO64.SYS — ENE Technology driver
+
         "f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2",
-        // ASWARPOT.SYS — Avast kernel driver (hijacked variants)
+
         "12b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
     };
     if (sha256.empty()) return false;
@@ -2485,18 +2433,15 @@ static bool IsKnownByovdHash(const std::string& sha256) {
     return kByovdHashes.find(low) != kByovdHashes.end();
 }
 
-// Returns true when at least two independent signals of active manipulation exist.
-// Prevents single-indicator false positives (e.g. a crash dump driver that is
-// unsigned but otherwise clean triggering HIGH purely from the unsigned penalty).
 static bool HasCorroboratingManipulationEvidence(
     bool hasHooks, bool hasRWXSection, bool memSizeMismatch,
     bool checksumFail, bool moduleListMismatch,
     bool loadedWithoutService, bool unsignedCallbacks)
 {
     int evidence = 0;
-    if (hasHooks)             evidence += 2;  // inline patch — high weight
-    if (checksumFail)         evidence += 2;  // modified after signing — high weight
-    if (moduleListMismatch)   evidence += 2;  // hiding from enumeration — high weight
+    if (hasHooks)             evidence += 2;
+    if (checksumFail)         evidence += 2;
+    if (moduleListMismatch)   evidence += 2;
     if (hasRWXSection)        evidence += 1;
     if (memSizeMismatch)      evidence += 1;
     if (loadedWithoutService) evidence += 1;
@@ -2756,7 +2701,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
     std::string date, timeStr;
     FileTimeToLocalStrings(now, date, timeStr);
 
-    // P1 — reset cert serial map for this scan session
+
     GetCertSerialMap().clear();
 
     std::vector<ScannerUI::DriverIntegrityFinding> findings;
@@ -2803,11 +2748,11 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         bool suspiciousPath = IsDriverPathSuspicious(path);
         DetectionFilter::PathClass pathClass = DetectionFilter::ClassifyPath(path);
         bool diskFileExists = FileExistsW(path);
-        // Genuine crash dump filter drivers are loaded by the kernel without a
-        // persistent backing file (per IsCrashDumpDriverName's contract). A "DUMP_*"
-        // name that DOES have a backing file on disk is not behaving like a real
-        // crash-dump driver, so it must not get the reduced-scrutiny pass below —
-        // otherwise an attacker can name a malicious driver DUMP_*.SYS to evade checks.
+
+
+
+
+
         bool realCrashDump = crashDumpDriver && !diskFileExists;
         bool hasLoadedMemoryInfo = false;
         LoadedKernelModuleInfo loadedMemory;
@@ -2857,7 +2802,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         bool hasCpuidVmCheck = false;
         bool hasPebDebugCheck = false;
 
-
         if (IsKnownSystemDriverName(driverNameUp) && !systemPath) {
             EscalateDriverFinding(f, "HIGH", "known system driver name loaded from non-standard path");
             AddUniqueToken(anomalyTokens, "system-name-outside-system-path");
@@ -2872,10 +2816,9 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             AddUniqueToken(anomalyTokens, "known-byovd-family");
         }
 
-
         f.sha256 = ComputeDriverSha256(path);
 
-        // P6 — BYOVD hash-based detection (rename-proof)
+
         if (!f.sha256.empty() && IsKnownByovdHash(f.sha256)) {
             byovdHashMatch = true;
             EscalateDriverFinding(f, "HIGH",
@@ -2891,8 +2834,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         if (f.signedOk) {
             signerNameW = GetDriverSignerName(path);
             f.signerName = WideToUtf8(signerNameW);
-
-
 
             if (systemPath && IsKnownSystemDriverName(driverNameUp) && !signerNameW.empty() && !IsMicrosoftSigner(signerNameW)) {
                 f.signerTrusted = false;
@@ -2950,7 +2891,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                 logEvidence += (logEvidence.empty() ? "" : "; ") + evByServiceName->second;
         }
 
-        // CodeIntegrity event: OS detected unsigned/tampered code for this driver
+
         if (logEvidence.find("CodeIntegrity") != std::string::npos) {
             EscalateDriverFinding(f, "HIGH",
                 "OS code integrity system flagged this driver (CodeIntegrity event detected)");
@@ -2958,7 +2899,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             f.maliciousScore += 30;
         }
 
-        // 2+ occurrences of EID 7036 in evidence = service had stop+start cycle after boot
+
         {
             int n7036 = 0;
             size_t pos = 0;
@@ -2970,8 +2911,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                 AddUniqueToken(anomalyTokens, "service-restarted-post-boot");
             }
         }
-
-
 
         std::vector<std::wstring> winsxsRefs = FindWinSxSReferences(path);
         if (!winsxsRefs.empty()) {
@@ -2993,9 +2932,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
         }
 
-
-
-
         bool catalogFoundByHash = false;
         bool catApiOk = VerifyDriverCatalog(path, catalogFoundByHash);
         f.catalogOk = f.catalogOk || catalogFoundByHash;
@@ -3005,7 +2941,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             AddUniqueToken(anomalyTokens, "catalog-missing-system-weak");
         }
 
-
         f.checksumOk = VerifyPEChecksum(path);
         if (!f.checksumOk && !trustedSignature && f.severity != "HIGH") {
             f.severity = "HIGH";
@@ -3013,14 +2948,12 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             f.suspicious = true;
         }
 
-
         f.hasOverlay = DetectPEOverlay(path);
         if (f.hasOverlay && !trustedSignature && f.severity != "HIGH") {
             f.severity = "HIGH";
             f.reason = "PE overlay detected: data appended after last section";
             f.suspicious = true;
         }
-
 
         {
             double entropy = DetectionFilter::FileEntropySample(path);
@@ -3033,7 +2966,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
 
         DriverPeAnomalyInfo peShape = AnalyzeDriverPeShape(path);
         if (!peShape.valid) {
-            // Crash dump drivers have no accessible backing file — invalid PE is expected
+
             if (!trustedSignature && !crashDumpDriver)
                 EscalateDriverFinding(f, "HIGH", "loaded driver image is not a valid PE file on disk");
             if (!crashDumpDriver)
@@ -3061,7 +2994,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                 EscalateDriverFinding(f, "MEDIUM", "unsigned driver has no import table");
                 AddUniqueToken(anomalyTokens, "no-import-table");
             }
-            // P3 — new PE section heuristics
+
             if (peShape.missingRichHeader && !trustedSignature) {
                 EscalateDriverFinding(f, "MEDIUM",
                     "driver has no Rich header (not built by standard MSVC toolchain)");
@@ -3089,7 +3022,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
         }
 
-        // P2 — Import table behavioral fingerprinting
+
         if (diskFileExists) {
             ImportBehaviorResult impResult = AnalyzeImportBehavior(path);
             impHash = impResult.impHash;
@@ -3124,7 +3057,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
 
         DriverVersionInfo versionInfo = GetDriverVersionInfo(path);
 
-        // P1 — Certificate deep analysis
+
         if (f.signedOk && diskFileExists) {
             CertDeepResult certResult = AnalyzeCertificateDeep(path);
             certSelfSigned = certResult.selfSigned;
@@ -3167,7 +3100,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
         }
 
-        // P8 — Anti-analysis patterns (scan raw PE bytes)
+
         if (diskFileExists) {
             std::vector<uint8_t> rawPe;
             if (ReadWholeDriverFile(path, rawPe)) {
@@ -3191,7 +3124,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                 }
             }
         }
-
 
         if (hasLoadedMemoryInfo) {
             f.loadAddress = loadedMemory.base;
@@ -3222,7 +3154,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         } else if (!loadedModules.empty()) {
             memoryEvidence = "SystemModuleInformation=no_match";
             if (realCrashDump) {
-                // Crash dump drivers may not appear in SystemModuleInformation — expected
+
                 AddUniqueToken(anomalyTokens, "module-list-mismatch-crashdump");
             } else if (!trustedSignature || suspiciousPath) {
                 EscalateDriverFinding(f, !trustedSignature ? "HIGH" : "MEDIUM",
@@ -3252,7 +3184,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             memoryEvidence += (memoryEvidence.empty() ? "" : " ");
             memoryEvidence += "disk_file=missing";
             if (realCrashDump) {
-                // Crash dump filter drivers are memory-only — no persistent backing file is expected
+
                 AddUniqueToken(anomalyTokens, "loaded-image-file-missing-crashdump");
             } else if (!trustedSignature || suspiciousPath || !systemPath) {
                 EscalateDriverFinding(f, "HIGH", "loaded driver backing file is missing or no longer readable");
@@ -3280,9 +3212,9 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             if (!trustedSignature && f.severity == "INFO")
                 EscalateDriverFinding(f, "MEDIUM", "unsigned driver has missing version metadata");
         }
-        // If the disk file IS already a known system driver, OriginalFilename may differ
-        // legitimately (e.g. ntoskrnl.exe ships with OriginalFilename = ntkrnlmp.exe).
-        // Only flag when a NON-system driver claims to be a system driver in its metadata.
+
+
+
         bool diskIsKnownSystemDriver = IsKnownSystemDriverName(driverNameUp);
         if (!originalNameUp.empty() && IsKnownSystemDriverName(originalNameUp)
             && originalNameUp != driverNameUp
@@ -3297,8 +3229,8 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             AddUniqueToken(anomalyTokens, "version-company-mismatch");
         }
 
-        // A driver outside system32 that has no valid Microsoft signature but claims
-        // to be from Microsoft in its version metadata is almost certainly spoofing.
+
+
         if (!systemPath && !trustedSignature && !versionCompanyUp.empty()) {
             if (versionCompanyUp.find(L"MICROSOFT") != std::wstring::npos ||
                 versionCompanyUp.find(L"WINDOWS CORPORATION") != std::wstring::npos) {
@@ -3316,7 +3248,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                                   "unsigned driver file was created or modified after boot");
             AddUniqueToken(anomalyTokens, "unsigned-file-touched-after-boot");
         }
-
 
         for (int t = 0; kHookTargets[t].driver; ++t) {
             if (driverNameUp != kHookTargets[t].driver) continue;
@@ -3338,10 +3269,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
             break;
         }
-
-
-
-
 
         {
             std::vector<std::string> callbackTokens = FindImportedKernelCallbacks(path);
@@ -3378,7 +3305,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
         }
 
-
         bool trustedPathClass = pathClass == DetectionFilter::PathClass::SystemTrusted ||
                                 pathClass == DetectionFilter::PathClass::ProgramFiles;
         if (!f.signedOk && !f.catalogOk && f.severity == "INFO" && !realCrashDump &&
@@ -3403,7 +3329,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             AddUniqueToken(anomalyTokens, "downgraded-weak-only");
         }
 
-
         bool noServiceReg  = !hasServiceInfo && !systemPath;
         bool bootStartConf = hasServiceInfo && (serviceInfo.start == 0 || serviceInfo.start == 1);
         bool memMismatch   = std::find(anomalyTokens.begin(), anomalyTokens.end(), "memory-size-mismatch") != anomalyTokens.end();
@@ -3412,7 +3337,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         bool byovdName = IsKnownAbusedDriverName(driverNameUp);
         bool unsignedCallbacks = f.hasCallbackSurface && !trustedSignature;
 
-        // Manual mapper composite: phantom kernel module (no module list, no disk, no service, unsigned)
+
         bool manualMapperPattern =
             modListMismatch && !diskFileExists && noServiceReg && !trustedSignature;
         if (manualMapperPattern) {
@@ -3422,7 +3347,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             f.maliciousScore += 40;
         }
 
-        // Stripped binary: no rich header + minimal imports + no version info + unsigned (kdmapper output)
+
         bool strippedBinaryPattern =
             HasToken(anomalyTokens, "no-rich-header") &&
             HasToken(anomalyTokens, "import-count-suspect") &&
@@ -3444,7 +3369,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             !f.checksumOk, memMismatch, modListMismatch,
             realCrashDump);
 
-        // P1/P2 — bonus score for new deep detections
+
         if (certSelfSigned)  f.maliciousScore += 25;
         if (certHomoglyphCn) f.maliciousScore += 35;
         if (certEkuMismatch    && (!systemPath || !IsTrustedDriverPublisher(signerNameW, versionInfo)))
@@ -3461,8 +3386,8 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
                   : f.maliciousScore >= 20 ? "SUSPICIOUS"
                   : "BENIGN";
 
-        // For non-BYOVD, non-hooked drivers raised to HIGH: require at least
-        // two independent manipulation signals before keeping that severity.
+
+
         if (f.severity == "HIGH" && !byovdName && !f.hasHooks && !realCrashDump) {
             if (!HasCorroboratingManipulationEvidence(
                     f.hasHooks, hasRWXSection, memMismatch,
@@ -3474,7 +3399,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
             }
         }
 
-        // Crash dump drivers with no active manipulation evidence: skip entirely
+
         if (realCrashDump && !f.hasHooks && !unsignedCallbacks &&
             !memMismatch && !hasRWXSection && f.checksumOk) {
             continue;
@@ -3587,9 +3512,6 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
     return findings;
 }
 
-
-
-// Returns the upper-case extension (incl. the dot) of a path, or empty if none.
 static std::wstring FileExtensionUpper(const std::wstring& path) {
     size_t dot = path.find_last_of(L'.');
     size_t slash = path.find_last_of(L"\\/");
@@ -3598,15 +3520,13 @@ static std::wstring FileExtensionUpper(const std::wstring& path) {
     return ToUpperInvariant(path.substr(dot));
 }
 
-// Compact a long path while preserving the file name — the most identifying
-// part for triage — instead of truncating it away (e.g. ".../Discor...").
 static std::wstring CompactPathPreserveName(const std::wstring& path, size_t maxLen) {
     if (path.size() <= maxLen) return path;
     size_t slash = path.find_last_of(L"\\/");
     std::wstring name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
     if (name.size() + 6 >= maxLen)
         return path.substr(0, maxLen > 3 ? maxLen - 3 : maxLen) + L"...";
-    size_t headLen = maxLen - name.size() - 5; // 5 = length of "\...\"
+    size_t headLen = maxLen - name.size() - 5;
     return path.substr(0, headLen) + L"\\...\\" + name;
 }
 
@@ -3620,11 +3540,11 @@ static std::wstring ExtractExeFromCmd(const std::wstring& cmd) {
         return e != std::wstring::npos ? s.substr(1, e - 1) : s.substr(1);
     }
 
-    // Unquoted command lines are ambiguous when the path itself contains
-    // spaces (e.g. C:\Program Files\Lightshot\Lightshot.exe --autostart) —
-    // splitting on the first space yields garbage like "C:\Program". Resolve
-    // it the same way Windows resolves ImagePath values: scan for a known
-    // executable extension whose end is followed by whitespace/end-of-string.
+
+
+
+
+
     static const wchar_t* kExeExt[] = {
         L".EXE", L".DLL", L".COM", L".BAT", L".CMD", L".SCR", L".PIF", nullptr
     };
@@ -3677,7 +3597,6 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
         }
     }
 
-
     {
         HKEY ifeo = nullptr;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -3698,10 +3617,10 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
                                      reinterpret_cast<LPBYTE>(dbg), &dbgSz) == ERROR_SUCCESS &&
                     (dbgType == REG_SZ || dbgType == REG_EXPAND_SZ) && dbg[0] != L'\0') {
 
-                    // IFEO "Debugger" is also used legitimately — Visual Studio's
-                    // JIT debugger (vsjitdebugger.exe), Application Verifier,
-                    // WER (WerFault.exe), gflags, etc. A signed tool living in a
-                    // trusted directory is a known pattern, not a hijack.
+
+
+
+
                     std::wstring dbgExe = ExtractExeFromCmd(dbg);
                     bool dbgFileExists = !dbgExe.empty() && FileExistsW(dbgExe);
                     bool dbgSignedOk   = dbgFileExists && IsAuthenticodeSigned(dbgExe);
@@ -3732,7 +3651,6 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
             RegCloseKey(ifeo);
         }
     }
-
 
     {
         HKEY h = nullptr;
@@ -3765,7 +3683,7 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
         }
     }
 
-    // P4 — DKOM cross-check: compare RegEnumKey vs NtEnumerateKey for hidden services
+
     {
         typedef NTSTATUS (WINAPI* NtEnumerateKeyFn)(HANDLE, ULONG, ULONG, PVOID, ULONG, PULONG);
         HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -3774,13 +3692,13 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
             : nullptr;
 
         if (NtEnumerateKey) {
-            // The Services key changes constantly (Windows Update, driver/AV
-            // installs, Plug-and-Play), so two independent enumeration passes
-            // taken back-to-back can legitimately disagree (TOCTOU race) —
-            // a key created/removed between the passes looks "hidden" but
-            // isn't. Snapshot the Win32 view, build candidates from the Nt
-            // view, then re-snapshot the Win32 view and only report names
-            // that are STILL missing on the second look.
+
+
+
+
+
+
+
             auto collectWin32Names = [&]() {
                 std::unordered_set<std::wstring> names;
                 HKEY root = nullptr;
@@ -3806,8 +3724,8 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
                               0, KEY_READ | KEY_WOW64_64KEY, &svcRoot) == ERROR_SUCCESS) {
                 std::unordered_set<std::wstring> win32Names = collectWin32Names();
 
-                // Collect candidate "hidden" names via NtEnumerateKey (lower-level)
-                // KEY_BASIC_INFORMATION = class 0, contains name after fixed header
+
+
                 struct KeyBasicInfo {
                     LARGE_INTEGER LastWriteTime;
                     ULONG TitleIndex;
@@ -3820,13 +3738,13 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
                     ULONG retLen = 0;
                     NTSTATUS st = NtEnumerateKey(svcRoot, idx, 0,
                                                  kbiBuf.data(), (ULONG)kbiBuf.size(), &retLen);
-                    if (st == 0x80000005L /*STATUS_BUFFER_OVERFLOW*/ ||
-                        st == 0xC0000023L /*STATUS_BUFFER_TOO_SMALL*/) {
+                    if (st == 0x80000005L  ||
+                        st == 0xC0000023L ) {
                         kbiBuf.resize(retLen + 64);
                         st = NtEnumerateKey(svcRoot, idx, 0,
                                             kbiBuf.data(), (ULONG)kbiBuf.size(), &retLen);
                     }
-                    if (st == 0x8000001AL /*STATUS_NO_MORE_ENTRIES*/ || st < 0)
+                    if (st == 0x8000001AL  || st < 0)
                         break;
                     auto* kbi = reinterpret_cast<const KeyBasicInfo*>(kbiBuf.data());
                     if (kbi->NameLength == 0 || kbi->NameLength > 512) continue;
@@ -3841,9 +3759,9 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
                     std::unordered_set<std::wstring> win32NamesConfirm = collectWin32Names();
                     for (const auto& name : candidates) {
                         if (win32NamesConfirm.find(ToUpperInvariant(name)) != win32NamesConfirm.end())
-                            continue; // reappeared on the second pass — TOCTOU race, not hidden
+                            continue;
 
-                        // Consistently invisible to Win32 while visible to Nt = rootkit
+
                         ScannerUI::RegistryFinding f;
                         f.date = date; f.time = timeStr;
                         f.severity = "HIGH";
@@ -3869,16 +3787,10 @@ std::vector<ScannerUI::RegistryFinding> CollectRegistryPersistenceFindings(std::
     return findings;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CLSID Hijack Detection
-// ─────────────────────────��──────────────────────────���────────────────────────
-
 static std::wstring ClsidAsciiToWide(const std::string& s) {
     return std::wstring(s.begin(), s.end());
 }
 
-// Read the InprocServer32 or LocalServer32 default value for a CLSID key.
-// Returns the (expanded, normalized) server path and the server subkey name.
 static std::wstring ReadClsidServerPath(HKEY root, const std::wstring& clsidKeyPath,
                                         std::string& outServerType, REGSAM view = 0) {
     static const wchar_t* kSrvKeys[] = { L"InprocServer32", L"LocalServer32", nullptr };
@@ -3985,9 +3897,9 @@ static bool IsOfficialMicrosoftAdoServer(const std::wstring& path) {
     if (upper != expected64 && upper != expected32)
         return false;
 
-    // Some Windows images lack cached revocation data, making the strict offline
-    // trust pass inconclusive. For this exact OS-owned ADO path, accept a normal
-    // Authenticode chain only when the embedded signer is Microsoft.
+
+
+
     WINTRUST_FILE_INFO fileInfo = {};
     fileInfo.cbStruct = sizeof(fileInfo);
     fileInfo.pcwszFilePath = path.c_str();
@@ -4302,8 +4214,8 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
         return matches;
     };
 
-    // ── Phase 1: Enumerate HKCU\SOFTWARE\Classes\CLSID ────────────────────────
-    // Any CLSID here that also exists in HKCR = COM hijack (no admin needed).
+
+
     HKEY hkuRoot = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Classes\\CLSID",
                       0, KEY_READ, &hkuRoot) == ERROR_SUCCESS) {
@@ -4317,7 +4229,7 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                               nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
                 continue;
 
-            // Does this CLSID have a system-level registration in HKCR?
+
             bool existsInHkcr = false;
             {
                 HKEY hTest = nullptr;
@@ -4329,7 +4241,7 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                 }
             }
 
-            // Friendly name from HKCR default value
+
             std::wstring friendlyName;
             if (existsInHkcr) {
                 HKEY hName = nullptr;
@@ -4344,7 +4256,7 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                 }
             }
 
-            // Server path from HKCU registration
+
             std::string serverType;
             std::wstring hkuKeyPath = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + guid;
             std::wstring serverPathW = ReadClsidServerPath(HKEY_CURRENT_USER, hkuKeyPath, serverType);
@@ -4354,18 +4266,18 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                 continue;
             bool isSigned   = fileExists && IsAuthenticodeSigned(serverPathW);
 
-            // Classify the server path
+
             bool pathSuspicious = false;
             if (!serverPathW.empty() && fileExists) {
                 auto pathClass = DetectionFilter::ClassifyPath(serverPathW);
                 pathSuspicious = !DetectionFilter::IsTrustedDir(pathClass);
             }
 
-            // A CLSID present in both HKCU and HKCR is normal Windows/COM
-            // behavior (per-user installs, Office Click-to-Run, MSIX/AppV
-            // virtualization, shell-extension reinstalls, …). Compare what the
-            // HKCU registration actually points to against the legitimate HKCR
-            // server — only a *different* server is a real override signal.
+
+
+
+
+
             bool hkcrSameServer    = false;
             bool hkcrSamePublisher = false;
             if (existsInHkcr) {
@@ -4376,17 +4288,17 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                     ToUpperInvariant(hkcrServerPathW) == ToUpperInvariant(serverPathW)) {
                     hkcrSameServer = true;
                 } else if (isSigned && !hkcrServerPathW.empty() && FileExistsW(hkcrServerPathW)) {
-                    // Same-publisher pairs are legitimate vendor variants/updates,
-                    // not hijacks. Hardened: both servers must be genuinely
-                    // trust-signed and chain to the same root CA, so a forged-CN
-                    // HKCU server cannot inherit the legitimate publisher's exemption.
+
+
+
+
                     hkcrSamePublisher = DetectionFilter::SamePublisherTrusted(serverPathW, hkcrServerPathW);
                 }
             }
             bool benignMirror = existsInHkcr && (hkcrSameServer || hkcrSamePublisher);
             bool realOverride = existsInHkcr && !benignMirror;
 
-            // Only report if there's a real reason to flag this entry
+
             bool isPhantom = !serverPathW.empty() && !fileExists;
             if (!realOverride && !isPhantom && !(pathSuspicious && !isSigned))
                 continue;
@@ -4405,10 +4317,10 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
             f.canClean     = true;
 
             if (isPhantom) {
-                // A registration pointing at a *missing* DLL in a user-writable
-                // staging area (TEMP/AppData/Downloads/Removable) is the classic
-                // pre-positioned COM hijack: the loader drops the DLL just-in-time.
-                // Escalate to HIGH for those locations; ProgramFiles/system stays MEDIUM.
+
+
+
+
                 auto phantomClass = DetectionFilter::ClassifyPath(serverPathW);
                 bool userWritable = phantomClass == DetectionFilter::PathClass::TempOrInstaller ||
                                     phantomClass == DetectionFilter::PathClass::UserProfile ||
@@ -4437,9 +4349,9 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
         RegCloseKey(hkuRoot);
     }
 
-    // ── Phase 2: Known attack-target CLSIDs ──────────────────────────────────
-    // These GUIDs are loaded by privileged processes (Task Scheduler, Explorer,
-    // MMC, etc.). If any appear in HKCU without an existing finding, escalate.
+
+
+
     static const struct { const wchar_t* guid; const char* desc; } kTargets[] = {
         { L"{0F87369F-A4E5-4CFC-BD3E-73E6154572DD}", "Task Scheduler (COM)" },
         { L"{1F486A52-3CB1-48FD-8F50-B8DC300D9F9D}", "Task Scheduler Handler" },
@@ -4460,10 +4372,10 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
         std::string guidStr = WideToUtf8(kTargets[ti].guid);
         std::wstring hkuPath = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kTargets[ti].guid;
 
-        // Presence alone isn't a signal — virtualized/per-user app packages
-        // (MSIX/AppV, Office Click-to-Run, …) legitimately shadow these GUIDs.
-        // Compare what HKCU actually points to against the legitimate HKCR
-        // registration before treating it as a hijack.
+
+
+
+
         HKEY hTest = nullptr;
         bool existsInHku = (RegOpenKeyExW(HKEY_CURRENT_USER, hkuPath.c_str(), 0, KEY_READ, &hTest) == ERROR_SUCCESS);
         if (existsInHku) RegCloseKey(hTest);
@@ -4484,13 +4396,13 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
                           ToUpperInvariant(hkcrServerPathW) == ToUpperInvariant(serverPathW);
         bool samePublisher = false;
         if (!sameServer && isSigned && !hkcrServerPathW.empty() && FileExistsW(hkcrServerPathW)) {
-            // Hardened same-publisher check (trust-verified CN + same root CA).
+
             samePublisher = DetectionFilter::SamePublisherTrusted(serverPathW, hkcrServerPathW);
         }
         bool benign = sameServer || samePublisher;
 
-        // Escalate an existing phase-1 finding for this CLSID — but only when
-        // the override is real, not a benign mirror/same-publisher variant.
+
+
         bool handledInPhase1 = false;
         for (auto& ef : findings) {
             if (ef.clsid == guidStr) {

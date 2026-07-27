@@ -40,12 +40,10 @@
 
 enum class ScanTier : int { Light = 0, Busy = 1, Overloaded = 2 };
 
-extern std::atomic_bool g_scanSlow;   // true when tier == Overloaded (kept for the render loop)
+extern std::atomic_bool g_scanSlow;
 extern std::atomic_bool g_scanFinished;
-extern std::atomic_int  g_scanTier;   // ScanTier sampled every 500ms from live CPU/RAM/GPU usage
+extern std::atomic_int  g_scanTier;
 
-// Call periodically from inside long-running scan loops (per-process, per-region, per-handle, ...)
-// to yield the CPU under load without slowing down the scan on an idle machine.
 void MaybePaceIteration(size_t& counter, size_t everyN);
 
 namespace ScanLimits {
@@ -55,8 +53,8 @@ namespace ScanLimits {
     constexpr DWORD  kEvtNextTimeoutMs     = 4000;
     constexpr DWORD  kProcessScanTimeoutMs = 3000;
     constexpr size_t kSignatureCacheMax    = 2048;
-    constexpr size_t kMaxGfxHookFindings  =   24; // cap for VTable/inline hook findings
-    constexpr size_t kMaxDeepScanFindings =   96; // cap for DeepScan topics (PLScan, HJCScan)
+    constexpr size_t kMaxGfxHookFindings  =   24;
+    constexpr size_t kMaxDeepScanFindings =   96;
 }
 
 namespace ScanTag {
@@ -69,9 +67,9 @@ namespace ScanTag {
     constexpr const char* GfxHook       = "GFXHOOK";
     constexpr const char* GfxHookThread = "GFXHOOK THREAD";
     constexpr const char* GfxHookMemory = "GFXHOOK MEMORY";
-    constexpr const char* ModulePatch   = "MODULE PATCH";   // PE checksum mismatch (binary patching)
-    constexpr const char* ModuleAnomaly = "MODULE ANOMALY"; // Rich header ausente / secao packer
-    constexpr const char* InjectHandle  = "INJECT HANDLE";  // handle com direitos de injecao
+    constexpr const char* ModulePatch   = "MODULE PATCH";
+    constexpr const char* ModuleAnomaly = "MODULE ANOMALY";
+    constexpr const char* InjectHandle  = "INJECT HANDLE";
     constexpr const char* Hollowing     = "HOLLOWING";
     constexpr const char* NamedPipe     = "NAMED_PIPE";
     constexpr const char* Lsp           = "LSP";
@@ -113,9 +111,6 @@ struct SystemHandleInformationEx {
     SystemHandleEntry Handles[1];
 };
 
-// One NtQuerySystemInformation(SystemHandleInformation) fetch, shared by every
-// consumer within a scan run instead of each re-querying the whole system handle
-// table (which can be 50k-200k+ entries) from scratch.
 struct SystemHandleSnapshot {
     std::vector<BYTE> buffer;
     bool ok = false;
@@ -192,9 +187,6 @@ std::vector<ScannerUI::ServiceStatus> CollectServiceStatuses();
 bool IsSecureBootEnabled();
 bool IsIommuEnabled();
 
-// Returns the AllocationBase addresses of all JMP-hook destinations found in
-// graphics API exports for the given process. Used to cross-reference injected
-// threads/memory regions against confirmed OpenGL/D3D hook payloads.
 std::unordered_set<uintptr_t> CollectGfxHookDestBases(HANDLE process,
                                                        const std::vector<ModuleRange>& modules);
 
@@ -214,13 +206,10 @@ std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies();
 std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(std::string& status);
 std::vector<ScannerUI::KernelAnomalyFinding>   CollectKernelAnomalies(std::string& status);
 
-
-
 void AppendTerminalLine(ScannerUI::ScanData& data, const std::string& line);
 void RunTerminalCommandAsync(const std::string& command, ScannerUI::ScanData& data, std::mutex& dataMutex);
 void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex);
 
-// P5 — Timeline correlation across BAM, Prefetch, USN journal, and Sysmon events
 std::vector<ScannerUI::TimelineCorrelationFinding>
 CollectTimelineCorrelationFindings(
     const std::vector<ScannerUI::BamEntry>& bam,

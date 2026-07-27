@@ -40,7 +40,7 @@ HANDLE OpenXvDevice() {
                        FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
-} // namespace
+}
 
 bool ExtractEmbeddedDriverResource(WORD resourceId,
                                    const char* expectedSha256,
@@ -113,8 +113,8 @@ bool DeleteEmbeddedDriverFile(std::wstring& path) {
         Sleep(40);
     }
 
-    // A kernel image can remain referenced briefly after SERVICE_STOP. Keep a
-    // cleanup fallback without leaving a permanent service or driver path.
+
+
     MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
     path.clear();
     return false;

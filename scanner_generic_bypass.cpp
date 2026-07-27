@@ -26,8 +26,7 @@ static void AddGenericBypassFinding(std::vector<ScannerUI::GenericBypassFinding>
     out.push_back(finding);
 }
 
-// Richer overload carrying rule/confidence/evidence metadata for detectors that classify
-// destinations by trust tier (signed vs unsigned vs unresolved) rather than a flat severity.
+
 static void AddGenericBypassFinding(std::vector<ScannerUI::GenericBypassFinding>& out,
                                     const std::string& type,
                                     const std::string& process,
@@ -122,9 +121,9 @@ static void CollectHdPlayerExternalHandles(std::vector<ScannerUI::GenericBypassF
 
         std::wstring sourcePathW = ProcessFullPathW(sourcePid);
         if (!sourcePathW.empty()) {
-            // Emulator-name match alone is not a trust signal — a malicious process can be
-            // renamed to a known emulator binary (e.g. MEMU.EXE) from any folder. Only
-            // exempt when the executable is also signed and in a trusted directory.
+
+
+
             DetectionFilter::PathClass sourceClass = DetectionFilter::ClassifyPath(sourcePathW);
             if (DetectionFilter::IsTrustedSignedCached(sourcePathW) &&
                 DetectionFilter::IsTrustedDir(sourceClass))
@@ -144,7 +143,7 @@ static void CollectHdPlayerExternalHandles(std::vector<ScannerUI::GenericBypassF
     }
 }
 
-// ─── helpers shared by new detection functions ────────────────────────────────
+
 
 static std::wstring ExpandEnvPathW(const std::wstring& value) {
     if (value.empty())
@@ -172,13 +171,7 @@ static bool IsWritablePathTokenAvExclusion(const std::wstring& up) {
     return false;
 }
 
-// Samples up to kMaxSample .exe files directly under `dir` (and its \bin, \x64, \x86
-// subfolders, if present) and returns true as soon as one is genuinely Authenticode/
-// catalog signed (reuses IsTrustedSignedCached — real WinVerifyTrust chain validation,
-// not a name/path heuristic). This excuses the EXCLUSION as pointing at a currently
-// installed, verifiably-signed piece of software; it does not excuse any other
-// individual unsigned file that may also live in that folder (those remain subject to
-// every other scanner in the codebase).
+
 static bool DirectoryHasTrustedSignedExecutable(const std::wstring& dir) {
     static const wchar_t* kSubdirs[] = { L"", L"\\bin", L"\\x64", L"\\x86", nullptr };
     constexpr int kMaxSample = 40;
@@ -436,20 +429,19 @@ static bool IsAddrInModules(uintptr_t addr, const std::vector<ModuleRange>& modu
     return false;
 }
 
-// Follow a JMP chain in remote process memory, returning the final destination address.
-// Supports: E9 rel32, FF 25 [rip+disp32], 48 B8 imm64 FF E0, 68 imm32 C3.
+
 static uintptr_t FollowJmpChain(HANDLE process, uintptr_t addr, int maxHops = 7) {
     for (int hop = 0; hop < maxHops; ++hop) {
         BYTE buf[16] = {};
         SIZE_T got = 0;
         if (!ReadProcessMemory(process, (LPCVOID)addr, buf, sizeof(buf), &got) || got < 5)
             return addr;
-        if (buf[0] == 0xE9) {  // JMP rel32
+        if (buf[0] == 0xE9) {
             INT32 rel = *reinterpret_cast<const INT32*>(buf + 1);
             addr = addr + 5 + (uintptr_t)(intptr_t)rel;
             continue;
         }
-        if (buf[0] == 0xFF && buf[1] == 0x25 && got >= 6) {  // JMP [rip+disp32]
+        if (buf[0] == 0xFF && buf[1] == 0x25 && got >= 6) {
             INT32 disp = *reinterpret_cast<const INT32*>(buf + 2);
             uintptr_t slot = addr + 6 + (uintptr_t)(intptr_t)disp;
             uintptr_t target = 0;
@@ -460,11 +452,11 @@ static uintptr_t FollowJmpChain(HANDLE process, uintptr_t addr, int maxHops = 7)
             continue;
         }
         if (buf[0] == 0x48 && buf[1] == 0xB8 && got >= 12 &&
-            buf[10] == 0xFF && buf[11] == 0xE0) {  // MOV RAX,imm64; JMP RAX
+            buf[10] == 0xFF && buf[11] == 0xE0) {
             addr = *reinterpret_cast<const uintptr_t*>(buf + 2);
             continue;
         }
-        if (buf[0] == 0x68 && got >= 6 && buf[5] == 0xC3) {  // PUSH imm32; RET
+        if (buf[0] == 0x68 && got >= 6 && buf[5] == 0xC3) {
             DWORD imm = *reinterpret_cast<const DWORD*>(buf + 1);
             addr = (uintptr_t)imm;
             continue;
@@ -483,16 +475,7 @@ static bool IsJmpHookPattern(const BYTE* b, size_t len) {
     return false;
 }
 
-// Content-based check: does this remote module export any graphics API symbol?
-// Reads the first 4096 bytes of the module and parses its export directory.
-// NO name/path check — cheats can use any name or path.
-// ─── Hook-destination trust classification ────────────────────────────────────
-// Shared trust tiering used by CollectGraphicsHookFindings and ScanDxgiVtableIntegrity
-// (ScanIatHooks calls DetectionFilter::ResolveModuleTrustAtAddress directly since it has
-// no "does the destination itself export a graphics symbol" concept). A destination is
-// only ever fully suppressed (LayeredTrustedGfx) when it lands back in the same module,
-// or in a module that is BOTH signed AND itself exports a graphics symbol — otherwise it
-// is still reported, just at a severity/confidence reflecting the partial trust evidence.
+
 enum class HookDestTrust { LayeredTrustedGfx, SignedNonGfx, Unsigned, Unresolved };
 
 struct HookDestVerdict {
@@ -508,7 +491,7 @@ static HookDestVerdict ClassifyHookDestination(HANDLE process, uintptr_t destAdd
         if (destAddr < m.begin || destAddr >= m.end) continue;
         v.resolvedPath = m.path;
         if (!sourceModulePath.empty() && m.path == sourceModulePath) {
-            v.trust = HookDestTrust::LayeredTrustedGfx;  // self-referential thunk
+            v.trust = HookDestTrust::LayeredTrustedGfx;
             return v;
         }
         if (DetectionFilter::IsTrustedSignedCached(m.path)) {
@@ -521,7 +504,7 @@ static HookDestVerdict ClassifyHookDestination(HANDLE process, uintptr_t destAdd
         }
         return v;
     }
-    // Not in the (possibly stale) module snapshot — resolve live.
+
     auto resolved = DetectionFilter::ResolveModuleTrustAtAddress(process, destAddr);
     v.resolvedPath = resolved.path;
     if (!resolved.resolved) { v.trust = HookDestTrust::Unresolved; return v; }
@@ -530,9 +513,7 @@ static HookDestVerdict ClassifyHookDestination(HANDLE process, uintptr_t destAdd
     return v;
 }
 
-// Maps a trust tier to (severity, ruleId, confidence, evidenceState). Callers must skip
-// emission entirely on LayeredTrustedGfx — the only tier backed by both cryptographic
-// trust AND content evidence.
+
 static void SeverityForHookDest(HookDestTrust t, const char* ruleFamily,
                                 std::string& sev, std::string& ruleId,
                                 std::string& conf, std::string& evState) {
@@ -553,11 +534,7 @@ static void SeverityForHookDest(HookDestTrust t, const char* ruleFamily,
     }
 }
 
-// ─── Graphics hook destination collector ─────────────────────────────────────
-// Scans graphics API exports in all modules of a single process for JMP hooks.
-// Returns the AllocationBase of every hook destination that lands outside a
-// trusted signed module. Used to cross-reference injected threads/memory so that
-// THREAD_INJECT and MEMORY_INJECT findings can be tagged as confirmed chams.
+
 std::unordered_set<uintptr_t> CollectGfxHookDestBases(HANDLE process,
                                                        const std::vector<ModuleRange>& modules) {
     std::unordered_set<uintptr_t> destBases;
@@ -647,14 +624,14 @@ std::unordered_set<uintptr_t> CollectGfxHookDestBases(HANDLE process,
 
             uintptr_t chainEnd = FollowJmpChain(process, funcAddr);
 
-            // Ignore destinations that land inside a trusted signed module
+
             for (const auto& m : modules) {
                 if (chainEnd >= m.begin && chainEnd < m.end) {
                     if (DetectionFilter::IsTrustedSignedCached(m.path)) {
                         BYTE dh[4096] = {}; SIZE_T dg = 0;
                         ReadProcessMemory(process, (LPCVOID)m.begin, dh, sizeof(dh), &dg);
                         if (DetectionFilter::ExportsGraphicsSymbol(dh, dg, m.begin))
-                            goto nextFunc; // legitimate overlay layering
+                            goto nextFunc;
                     }
                     break;
                 }
@@ -672,9 +649,7 @@ std::unordered_set<uintptr_t> CollectGfxHookDestBases(HANDLE process,
     return destBases;
 }
 
-// ─── Full content-based graphics inline hook scanner ─────────────────────────
-// Replaces the old name-based GfxHook detection. Checks EVERY module in every
-// emulator process; no module is skipped based on its name or path.
+
 static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFinding>& out) {
     std::vector<DWORD> pids = FindEmulatorProcesses();
     size_t gfxCount = 0;
@@ -698,7 +673,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
             std::wstring modName = BaseNameFromPath(module.path);
             bool modSigned = DetectionFilter::IsTrustedSignedCached(module.path);
 
-            // Re-read header to parse export directory in-memory
+
             BYTE hdr[4096] = {};
             SIZE_T hg = 0;
             if (!ReadProcessMemory(process, (LPCVOID)module.begin, hdr, sizeof(hdr), &hg) || hg < 0x40)
@@ -717,7 +692,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
                 expDirRva = *reinterpret_cast<const DWORD*>(hdr + optOff + 80);
             if (expDirRva == 0) continue;
 
-            // Read export directory from remote memory
+
             BYTE expBuf[4096] = {};
             SIZE_T eg = 0;
             uintptr_t expAddr = module.begin + expDirRva;
@@ -783,7 +758,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
                 uintptr_t chainEnd = FollowJmpChain(process, funcAddr);
 
                 HookDestVerdict destV = ClassifyHookDestination(process, chainEnd, modules, module.path);
-                if (destV.trust == HookDestTrust::LayeredTrustedGfx) continue; // legitimate layering
+                if (destV.trust == HookDestTrust::LayeredTrustedGfx) continue;
 
                 char funcBuf[32], chainBuf[32];
                 snprintf(funcBuf,  sizeof(funcBuf),  "0x%llX", (unsigned long long)funcAddr);
@@ -802,7 +777,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
                                             (destV.trust == HookDestTrust::SignedNonGfx
                                              ? " (assinado, sem exports graficos - possivel shim de overlay/captura)"
                                              : " (nao assinado)"));
-                // Diagnostic annotation (informational only — not a trust signal)
+
                 if (DetectionFilter::IsNamedLikeGraphicsRuntime(modName))
                     detail += " | nota: nome similar a runtime grafico";
                 else if (DetectionFilter::IsNamedLikeOverlay(modName))
@@ -817,9 +792,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
     }
 }
 
-// ─── NTDLL syscall stub integrity ────────────────────────────────────────────
-// Reads ntdll.dll from disk and compares first 5 bytes of each Nt*/Zw* export
-// against the in-memory version. Any mismatch on a valid stub = inline hook.
+
 static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>& out) {
     wchar_t sysDir[MAX_PATH] = {};
     if (!GetSystemDirectoryW(sysDir, (UINT)std::size(sysDir))) return;
@@ -921,10 +894,10 @@ static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>&
             continue;
         if (memcmp(diskBytes, memBytes, 5) == 0) continue;
 
-        // Mismatch detected — follow the JMP chain to identify the hook destination.
-        // AV/EDR products (Windows Defender, etc.) legitimately hook NTDLL stubs and
-        // their hooks land in signed modules. Only report if the destination is in
-        // anonymous memory or an unsigned DLL (characteristic of cheat hooks).
+
+
+
+
         uintptr_t hookTarget = inMemFunc;
         for (int hop = 0; hop < 5; ++hop) {
             BYTE hbuf[16] = {}; SIZE_T hr = 0;
@@ -946,7 +919,7 @@ static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>&
             break;
         }
 
-        // Check if hook destination is inside a loaded, signed module (AV/EDR hook)
+
         {
             HMODULE lmods[512] = {}; DWORD lneeded = 0;
             if (EnumProcessModulesEx(GetCurrentProcess(), lmods, sizeof(lmods), &lneeded, LIST_MODULES_ALL)) {
@@ -958,8 +931,8 @@ static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>&
                     wchar_t modPath[MAX_PATH] = {};
                     GetModuleFileNameExW(GetCurrentProcess(), lmods[mi], modPath, (DWORD)std::size(modPath));
                     if (DetectionFilter::IsTrustedSignedCached(modPath))
-                        goto skip_ntdll_hook; // AV/EDR hook into signed module — not a cheat
-                    break; // unsigned module at destination — fall through to report
+                        goto skip_ntdll_hook;
+                    break;
                 }
             }
         }
@@ -987,9 +960,7 @@ static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>&
     }
 }
 
-// ─── IAT hook detection ───────────────────────────────────────────────────────
-// Scans critical function IAT entries in emulator processes. Flags any entry
-// pointing outside all known modules (i.e. into anonymous memory).
+
 static void ScanIatHooks(std::vector<ScannerUI::GenericBypassFinding>& out) {
     static const char* kCritical[] = {
         "CreateRemoteThread", "VirtualAlloc", "VirtualAllocEx",
@@ -1091,11 +1062,11 @@ static void ScanIatHooks(std::vector<ScannerUI::GenericBypassFinding>& out) {
                                               : *reinterpret_cast<const uint32_t*>(iatBuf);
                     if (resolved == 0 || IsAddrInModules(resolved, modules)) continue;
 
-                    // Outside the (possibly stale) module snapshot — resolve live before deciding
-                    // trust. A late-loaded or manually-mapped-but-signed DLL is common for
-                    // legitimate overlay/anti-cheat/RGB software hooking exactly these APIs
-                    // (CreateRemoteThread, VirtualAlloc*, WriteProcessMemory...); "outside the
-                    // snapshot" alone is not equivalent to shellcode.
+
+
+
+
+
                     auto destTrust = DetectionFilter::ResolveModuleTrustAtAddress(process, resolved);
 
                     std::string key = std::to_string(pid) + ":" + std::to_string(module.begin) + ":" + std::to_string(ei);
@@ -1130,9 +1101,7 @@ static void ScanIatHooks(std::vector<ScannerUI::GenericBypassFinding>& out) {
     }
 }
 
-// ─── Vulkan implicit/explicit layer detection ─────────────────────────────────
-// Checks registry paths for Vulkan layers with unsigned or suspicious DLLs.
-// Unsigned Vulkan layers are a common chams injection vector.
+
 static void ScanVulkanLayers(std::vector<ScannerUI::GenericBypassFinding>& out) {
     struct RegSpec { HKEY root; const wchar_t* path; bool isUser; };
     static const RegSpec kSpecs[] = {
@@ -1186,18 +1155,18 @@ static void ScanVulkanLayers(std::vector<ScannerUI::GenericBypassFinding>& out) 
 
             bool isSigned = DetectionFilter::IsTrustedSignedCached(libW);
             DetectionFilter::PathClass cls = DetectionFilter::ClassifyPath(libW);
-            // For signed layers: only Temp paths are truly suspicious.
-            // HKCU, ProgramData, and ProgramFiles are all used legitimately by
-            // OBS Studio, NVIDIA GeForce Experience, and other capture software.
+
+
+
             bool suspPathForSigned = cls == DetectionFilter::PathClass::TempOrInstaller;
 
             std::string severity;
             if (!isSigned)
-                severity = "HIGH";       // unsigned layer = always report
+                severity = "HIGH";
             else if (suspPathForSigned)
-                severity = "MEDIUM";     // signed but in Temp = unusual
+                severity = "MEDIUM";
             else
-                severity = "FLAG";       // signed + normal path (incl. HKCU) → skip
+                severity = "FLAG";
 
             if (severity == "FLAG") continue;
 
@@ -1211,10 +1180,7 @@ static void ScanVulkanLayers(std::vector<ScannerUI::GenericBypassFinding>& out) 
     }
 }
 
-// ─── D3D11/DXGI VTable integrity ─────────────────────────────────────────────
-// Scans the .rdata section of graphics modules in emulator processes for
-// pointer-sized values that redirect outside the module into executable memory.
-// Identifies VTable overwrites without needing to instantiate COM objects.
+
 static void ScanDxgiVtableIntegrity(std::vector<ScannerUI::GenericBypassFinding>& out) {
     std::vector<DWORD> pids = FindEmulatorProcesses();
     size_t vtCount = 0;
@@ -1309,24 +1275,7 @@ static void ScanDxgiVtableIntegrity(std::vector<ScannerUI::GenericBypassFinding>
     }
 }
 
-// ─── Duplicate / sideloaded graphics modules ─────────────────────────────────
-// Splits canonical graphics DLLs in two policy classes:
-//
-//   STRICT: Windows-shipped DLLs that should NEVER be redistributed alongside
-//           a third-party executable. ANY copy outside System32/SysWOW64/WinSxS
-//           is treated as DLL search-order hijack regardless of signature.
-//             opengl32.dll, glu32.dll, d3d9.dll, d3d10.dll, d3d11.dll,
-//             d3d12.dll, dxgi.dll, d2d1.dll, dwrite.dll
-//
-//   BUNDLED: DLLs the Microsoft redistribution license permits applications to
-//            ship in their own install dir (ANGLE, D3DCompiler, SwiftShader,
-//            Vulkan loader). Every modern Android emulator (BlueStacks, MEmu,
-//            LDPlayer, Nox, MuMu) bundles these. Only flag if UNSIGNED, or if
-//            the publisher differs from the host .exe AND the DLL is in the
-//            exe directory.
-//
-// Same-publisher exemption: any side-by-side DLL signed by the same publisher
-// as the hosting executable is treated as vendor-shipped and skipped.
+
 static bool DupGfxIsSystemPath(const std::wstring& path) {
     const auto& r = DetectionFilter::Roots();
     std::wstring up = DetectionFilter::UpperW(path);
@@ -1337,9 +1286,9 @@ static bool DupGfxIsSystemPath(const std::wstring& path) {
 
 static bool DupGfxSamePublisherAsExe(const std::wstring& dllPath,
                                      const std::wstring& exePath) {
-    // Hardened: requires both binaries to be genuinely Authenticode-trusted and to
-    // share the same signer CN *and* root CA — a forged-CN/untrusted DLL placed next
-    // to a legit exe no longer inherits the vendor exemption.
+
+
+
     return DetectionFilter::SamePublisherTrusted(dllPath, exePath);
 }
 
@@ -1348,11 +1297,11 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
         L"OPENGL32.DLL", L"GLU32.DLL",
         L"D3D9.DLL", L"D3D10.DLL", L"D3D11.DLL", L"D3D12.DLL",
         L"DXGI.DLL", L"D2D1.DLL", L"DWRITE.DLL",
-        // Classic "phantom DLL" / search-order hijack targets. These are pure
-        // Windows DLLs that ship ONLY in System32/SysWOW64 and are never legitimately
-        // redistributed in an application directory. A side-by-side copy is the
-        // textbook DLL-search-order hijack used to gain code execution in a trusted
-        // process (proxying exports to the real System32 DLL).
+
+
+
+
+
         L"VERSION.DLL", L"DWMAPI.DLL", L"UXTHEME.DLL",
         L"CRYPTBASE.DLL", L"PROPSYS.DLL", L"UALAPI.DLL",
         L"PROFAPI.DLL", L"SECUR32.DLL", L"WTSAPI32.DLL",
@@ -1401,10 +1350,10 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
             bool bundled = !strict && matchList(upName, kBundledGfxDlls);
             if (!strict && !bundled) continue;
 
-            // (a) Same name loaded more than once. Require evidence of a
-            // hijack — at least one copy must be either unsigned or located
-            // outside trusted roots (System32/Program Files). Two signed
-            // copies in trusted dirs (rare WinSxS redirect) → skip.
+
+
+
+
             if (kv.second.size() > 1) {
                 bool anyUnsigned = false;
                 bool anySignedUntrustedDir = false;
@@ -1435,7 +1384,7 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
                 continue;
             }
 
-            // (b) Single copy, but loaded from outside System32/SysWOW64/WinSxS.
+
             const ModuleRange* m = kv.second.front();
             if (DupGfxIsSystemPath(m->path)) continue;
 
@@ -1444,12 +1393,12 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
             bool signedMod  = DetectionFilter::IsTrustedSignedCached(m->path);
             bool samePub    = signedMod && DupGfxSamePublisherAsExe(m->path, exePathW);
 
-            // Same-publisher signed DLL → vendor-shipped, always allowed.
+
             if (samePub) continue;
 
-            // BUNDLED list policy: signed DLLs anywhere are allowed (these are
-            // commonly redistributed by countless apps). Only unsigned copies
-            // are flagged.
+
+
+
             if (bundled && signedMod) continue;
             if (bundled && !signedMod) {
                 std::string detail = std::string("DLL grafica bundled NAO assinada: ") +
@@ -1462,13 +1411,13 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
                 continue;
             }
 
-            // STRICT list policy: any copy outside System32/SysWOW64/WinSxS is suspect.
-            //   - Unsigned                                      -> HIGH  (real hijack risk)
-            //   - Signed + side-by-side + SAME publisher as exe  -> already exempted above (samePub)
-            //   - Signed + side-by-side + DIFFERENT publisher    -> MEDIUM (plausible legit
-            //         third-party DLL-proxy tool; still a genuine hijack technique, so not
-            //         downgraded further even though signed)
-            //   - Signed, NOT side-by-side                       -> MEDIUM
+
+
+
+
+
+
+
             std::string detail = std::string("DLL do Windows fora do System32 (search-order hijack): ") +
                                  WideToUtf8(upName) +
                                  " | path=" + WideToUtf8(m->path) +
@@ -1485,8 +1434,8 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
             if (out.size() >= ScanLimits::kMaxBypassFindings) break;
         }
 
-        // (c) Strict gfx DLL file present in the exe dir but not loaded yet.
-        // Bundled list is skipped here — emulators legitimately ship those.
+
+
         if (!exeDir.empty()) {
             for (int i = 0; kStrictGfxDlls[i]; ++i) {
                 if (out.size() >= ScanLimits::kMaxBypassFindings) break;
@@ -1525,26 +1474,11 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
     }
 }
 
-// ─── Graphics strings in anonymous executable memory ─────────────────────────
-// Scans MEM_PRIVATE executable regions OUTSIDE all loaded modules for ASCII
-// identifiers that indicate the region is a chams/overlay loader resolving
-// OpenGL/WGL/EGL/D3D entry points by name.
-//
-// Anti-FP design:
-//   • Skip regions <4 KB (too small to host a loader) and >4 MB (V8/Skia/CEF
-//     JIT heaps used by Chromium-based emulator UIs).
-//   • Classify the region with three independent signals computed in ONE
-//     pass: distinctNeedleCount, loaderEvidence (full DLL filename like
-//     "opengl32.dll"), jitEvidence (V8/Chromium/SwiftShader/ANGLE markers).
-//   • Skip immediately if jitEvidence>0 — Chromium JIT pages legitimately
-//     embed gl* symbol tables for proc resolution.
-//   • Require (loaderEvidence AND distinctNeedles>=2) for HIGH. Without a
-//     full DLL filename present, require distinctNeedles>=4 for MEDIUM.
-//     This combination is essentially never produced incidentally.
+
 struct GfxRegionScore {
     int  distinctNeedles = 0;
-    bool loaderEvidence  = false;   // full DLL filename present
-    bool jitEvidence     = false;   // V8/Chromium/SwiftShader/ANGLE/Skia marker
+    bool loaderEvidence  = false;
+    bool jitEvidence     = false;
     const char* firstMatch = nullptr;
 };
 
@@ -1552,9 +1486,9 @@ static GfxRegionScore ClassifyGfxRegion(const BYTE* buf, size_t len) {
     GfxRegionScore s;
     if (len < 8) return s;
 
-    // Loader-evidence needles: only triggered by code that calls
-    // LoadLibraryA("opengl32.dll") or stores the filename in a string table.
-    // Chromium JIT does not contain these literal filenames.
+
+
+
     static const char* kLoaderNeedles[] = {
         "opengl32.dll", "OPENGL32.DLL", "Opengl32.dll",
         "d3d9.dll", "D3D9.DLL",
@@ -1565,9 +1499,9 @@ static GfxRegionScore ClassifyGfxRegion(const BYTE* buf, size_t len) {
         nullptr
     };
 
-    // Function-name needles: distinct match counter. A real loader/cham
-    // typically resolves several of these; JIT pages may have one or two by
-    // coincidence (e.g. an exported symbol name) but not many.
+
+
+
     static const char* kFuncNeedles[] = {
         "wglMakeCurrent", "wglSwapBuffers", "wglGetProcAddress",
         "wglCreateContext", "wglDeleteContext", "wglShareLists",
@@ -1584,8 +1518,8 @@ static GfxRegionScore ClassifyGfxRegion(const BYTE* buf, size_t len) {
         nullptr
     };
 
-    // JIT/Chromium/SwiftShader markers. Any single occurrence vetoes the
-    // region as JIT-origin even if it also contains gfx needles.
+
+
     static const char* kJitNeedles[] = {
         "v8::", "V8 ", "V8_", "Isolate", "IsolateData",
         "crashpad", "Crashpad", "CRASHPAD",
@@ -1621,7 +1555,7 @@ static GfxRegionScore ClassifyGfxRegion(const BYTE* buf, size_t len) {
     int jitFirst = -1;
     if (containsAny(kJitNeedles, jitFirst) > 0) {
         s.jitEvidence = true;
-        return s;  // JIT veto — short-circuit, no further classification needed
+        return s;
     }
 
     int loadFirst = -1;
@@ -1640,9 +1574,7 @@ static GfxRegionScore ClassifyGfxRegion(const BYTE* buf, size_t len) {
     return s;
 }
 
-// Determines if the host process is Chromium-based (HD-Player UI, CEF apps,
-// Electron etc.). Used to raise the gfx-needle threshold further, since
-// Chromium ships gl symbol tables in many places besides JIT.
+
 static bool ProcessHostsChromiumRuntime(const std::vector<ModuleRange>& modules) {
     for (const auto& m : modules) {
         if (m.path.empty()) continue;
@@ -1672,25 +1604,25 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
         std::vector<ModuleRange> modules;
         if (!CollectProcessModules(process, modules)) { CloseHandle(process); continue; }
 
-        // Cross-reference: if this exact allocation is ALSO a confirmed JMP-hook destination
-        // on a graphics API export (same collector wired into scanner_processes.cpp's
-        // injection scanners), the string-based classification below is corroborated by an
-        // independent structural signal and can stay at full severity. Without corroboration,
-        // string-only matches are downgraded: legitimate DLL-injection overlay tools resolve
-        // gl*/wgl*/d3d* symbols by name from a small anonymous stub by design — this looks
-        // identical to a cheat loader on strings alone.
+
+
+
+
+
+
+
         auto gfxHookDests = CollectGfxHookDestBases(process, modules);
 
         bool chromium = ProcessHostsChromiumRuntime(modules);
-        // Chromium-host processes raise the bar: still require loaderEvidence
-        // AND at least 3 distinct function needles to flag.
-        const int kMinNeedlesWithLoader    = chromium ? 3 : 2;
-        const int kMinNeedlesWithoutLoader = chromium ? 99 : 4;  // effectively off in chromium
 
-        // Region size band: chams loaders are tiny; anything outside this
-        // band is almost certainly not a loader.
-        constexpr SIZE_T kMinRegion = 4 * 1024;        // skip <4 KB
-        constexpr SIZE_T kMaxRegion = 4 * 1024 * 1024; // skip >4 MB (JIT heaps)
+
+        const int kMinNeedlesWithLoader    = chromium ? 3 : 2;
+        const int kMinNeedlesWithoutLoader = chromium ? 99 : 4;
+
+
+
+        constexpr SIZE_T kMinRegion = 4 * 1024;
+        constexpr SIZE_T kMaxRegion = 4 * 1024 * 1024;
 
         uintptr_t maxModEnd = 0;
         for (const auto& m : modules) if (m.end > maxModEnd) maxModEnd = m.end;
@@ -1733,8 +1665,8 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
                     }
                     if (total >= 8) {
                         GfxRegionScore s = ClassifyGfxRegion(buf.data(), total);
-                        // JIT veto already returns short-circuit; if jitEvidence
-                        // is set, skip without flagging.
+
+
                         bool flagHigh = !s.jitEvidence && s.loaderEvidence &&
                                         s.distinctNeedles >= kMinNeedlesWithLoader;
                         bool flagMed  = !s.jitEvidence && !s.loaderEvidence &&
@@ -1777,9 +1709,7 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
     }
 }
 
-// ─── Threads whose start region contains graphics strings ────────────────────
-// Same scoring engine as the anon-memory scan, plus thread-description filter
-// to skip JIT/renderer/compositor/crashpad worker threads by name.
+
 static bool ThreadNameLooksLikeJit(HANDLE thread) {
     using GetThreadDescriptionFn = HRESULT (WINAPI*)(HANDLE, PWSTR*);
     static auto fn = []() {
@@ -1827,9 +1757,9 @@ static void ScanThreadsWithGraphicsContext(std::vector<ScannerUI::GenericBypassF
         std::vector<ModuleRange> modules;
         if (!CollectProcessModules(process, modules)) { CloseHandle(process); continue; }
 
-        // See ScanGraphicsStringsInAnonMemory for rationale: corroborate string-only
-        // classification against confirmed graphics-hook destinations before trusting it
-        // at full severity.
+
+
+
         auto gfxHookDests = CollectGfxHookDestBases(process, modules);
 
         bool chromium = ProcessHostsChromiumRuntime(modules);
@@ -1931,7 +1861,7 @@ static void ScanThreadsWithGraphicsContext(std::vector<ScannerUI::GenericBypassF
     }
 }
 
-// --- Per-event-ID handlers returning true if a finding was produced ---
+
 
 static bool HandleSysmonServiceEvent(int id, const std::wstring& xml,
                                      std::string& type, std::string& detail) {
@@ -1977,9 +1907,9 @@ static bool HandleCheatDomainEvent(const std::wstring& xml,
     std::wstring dns = ToUpperInvariant(ExtractSysmonData(xml, L"QueryName"));
     for (int di = 0; DetectionFilter::kCheatDomains[di]; ++di) {
         const wchar_t* d = DetectionFilter::kCheatDomains[di];
-        // Only flag actual DNS queries — not command line arguments.
-        // Command line matching causes false positives when browsers, text editors,
-        // or security research tools reference these domains in arguments.
+
+
+
         if (dns.find(d) != std::wstring::npos) {
             type = ScanTag::CheatDomain;
             detail = "cheat service domain detected: " + WideToUtf8(d);
@@ -2000,9 +1930,9 @@ static bool HandleRemoteThreadEvent(const std::wstring& xml,
         L"CSRSS.EXE", L"WERFAULT.EXE", L"WERFAULTSECURE.EXE",
         L"SVCHOST.EXE", L"LSASS.EXE", L"SERVICES.EXE"
     };
-    // Known system process targets: game clients and anti-cheats (e.g. Roblox Hyperion)
-    // legitimately inject threads into these for crash reporting, telemetry, and hooks.
-    // Allow if source is Authenticode-signed, regardless of install directory.
+
+
+
     static const std::unordered_set<std::wstring> kTrustedSystemTargets = {
         L"SVCHOST.EXE", L"WINLOGON.EXE", L"LSASS.EXE",
         L"SERVICES.EXE", L"CSRSS.EXE", L"WININIT.EXE", L"SMSS.EXE"
@@ -2018,9 +1948,9 @@ static bool HandleRemoteThreadEvent(const std::wstring& xml,
         type   = ScanTag::RemoteThread;
         detail = "CreateRemoteThread: src=" + WideToUtf8(BaseNameFromPath(src)) +
                  " -> tgt=" + WideToUtf8(BaseNameFromPath(tgt));
-        // Severity based on cryptographic identity, not path:
-        // Both signed → legitimate overlay/hook between identified software (FLAG).
-        // Unsigned source → real injection threat (HIGH).
+
+
+
         outSeverity = (srcSigned && tgtSigned) ? "FLAG" : "HIGH";
         return true;
     }
@@ -2033,14 +1963,14 @@ static bool HandleProcessAccessEvent(const std::wstring& xml,
     std::wstring tgtAll = ExtractSysmonData(xml, L"TargetImage");
     std::string  acc    = WideToUtf8(ExtractSysmonData(xml, L"GrantedAccess"));
     if (ToUpperInvariant(tgtAll).find(L"HD-PLAYER.EXE") != std::wstring::npos)
-        return false; // handled by direct HD-Player path below
+        return false;
     bool vmWrite = (acc == "0x28" || acc == "0x38" || acc == "0x1FFFFF" ||
                     acc == "0x143A" || acc == "0x1F0FFF");
     if (!vmWrite) return false;
     auto srcCls = DetectionFilter::ClassifyPath(src);
     bool srcSigned = DetectionFilter::IsTrustedSignedCached(src);
-    // Emulator-name match alone is not a trust signal — only exempt when the source
-    // executable is also signed and located in a trusted directory.
+
+
     bool ignore = srcSigned && (DetectionFilter::IsTrustedDir(srcCls) ||
                                  srcCls == DetectionFilter::PathClass::ProgramFiles);
     if (!ignore) {
@@ -2115,9 +2045,9 @@ static void CollectGenericBypassEventLogs(std::vector<ScannerUI::GenericBypassFi
                 int id = _wtoi(ExtractXmlTag(xml, L"EventID").c_str());
                 bool hit = false;
                 std::string type, detail;
-                std::string evtSeverity = "HIGH";  // default; overridden per-handler
+                std::string evtSeverity = "HIGH";
 
-                // Dispatch to per-event-ID handlers
+
                 if (!hit) hit = HandleSysmonServiceEvent(id, xml, type, detail);
                 if (!hit) hit = HandleLogClearEvent(id, xml, type, detail);
                 if (!hit) hit = HandleCheatDomainEvent(xml, type, detail);
@@ -2125,7 +2055,7 @@ static void CollectGenericBypassEventLogs(std::vector<ScannerUI::GenericBypassFi
                 if (!hit && id == 10) hit = HandleProcessAccessEvent(xml, type, detail);
                 if (!hit && id == 1)  hit = HandleExplorerParentEvent(xml, type, detail);
 
-                // Direct HD-Player access via EventID 10 (emits finding directly)
+
                 if (id == 10 && !hit) {
                     std::string target = WideToUtf8(ExtractSysmonData(xml, L"TargetImage"));
                     std::string access = WideToUtf8(ExtractSysmonData(xml, L"GrantedAccess"));
@@ -2134,8 +2064,8 @@ static void CollectGenericBypassEventLogs(std::vector<ScannerUI::GenericBypassFi
                         (access == "0x20" || access == "0x28" || access == "0x38" ||
                          access == "0x1FFFFF" || access == "0x143A" || access == "0x1F0FFF")) {
                         std::wstring src = ExtractSysmonData(xml, L"SourceImage");
-                        // Emulator-name match alone is not a trust signal — only exempt when
-                        // the source executable is also signed and in a trusted directory.
+
+
                         bool ignore = DetectionFilter::IsTrustedSignedCached(src) &&
                                       DetectionFilter::IsTrustedDir(DetectionFilter::ClassifyPath(src));
                         if (!ignore)
@@ -2151,8 +2081,8 @@ static void CollectGenericBypassEventLogs(std::vector<ScannerUI::GenericBypassFi
                         ExtractSysmonData(xml, L"SourceImage"),
                         ExtractSysmonData(xml, L"ProcessName")
                     });
-                    // Use handler-provided severity when available (e.g. REMOTETHREAD
-                    // sets FLAG for both-signed interactions), otherwise apply defaults.
+
+
                     std::string finalSev = evtSeverity;
                     if (type == ScanTag::CheatDomain) finalSev = "MEDIUM";
                     AddGenericBypassFinding(out, type, process, "-", detail,
@@ -2166,30 +2096,30 @@ static void CollectGenericBypassEventLogs(std::vector<ScannerUI::GenericBypassFi
     }
 }
 
-// Enumerate \\.\pipe\* and flag pipes with cheat-related names.
+
 static void CollectSuspiciousNamedPipes(std::vector<ScannerUI::GenericBypassFinding>& out) {
     static const char* kPipeTokens[] = {
         "CHEAT", "BYPASS", "INJECT", "HWID", "SPOOF", "MAPPER",
         "RING0", "ROOTKIT", "PHANTOM",
-        // "LOADER" removed — too generic: matches .NET Assembly Loader, MSBuild, Unity, etc.
-        // "GHOST" removed — too generic: matches Symantec Ghost, enterprise backup tools.
-        // Replaced with cheat-specific compound variants:
+
+
+
         "RING0LOADER", "KLOADER", "HACKLOADER", "CHEATLOADER",
         "DLLGHOST", "PROCESSGHOST",
         "MHYPROTECT", "EAC_", "VANGUARD", "BATTLEYE",
         nullptr
     };
-    // Windows system pipes that legitimately contain blacklisted tokens as substrings.
-    // "epmapper" → "MAPPER" (RPC Endpoint Mapper, created by RPCSS).
+
+
     static const std::unordered_set<std::string> kSafeSystemPipes = {
-        "EPMAPPER",  // RPC Endpoint Mapper (RPCSS — used by COM/DCOM/.NET/VS)
-        "LSARPC",    // Local Security Authority RPC
-        "SAMR",      // Security Account Manager remote
-        "NTSVCS",    // NT Services
-        "SVCCTL",    // Service Control Manager
-        "WINREG",    // Remote Registry
-        "WKSSVC",    // Workstation Service
-        "SRVSVC",    // Server Service
+        "EPMAPPER",
+        "LSARPC",
+        "SAMR",
+        "NTSVCS",
+        "SVCCTL",
+        "WINREG",
+        "WKSSVC",
+        "SRVSVC",
     };
 
     WIN32_FIND_DATAA fd = {};
@@ -2217,7 +2147,7 @@ static void CollectSuspiciousNamedPipes(std::vector<ScannerUI::GenericBypassFind
     FindClose(h);
 }
 
-// WSAPROTOCOL_INFOW forward declaration to avoid including ws2spi.h which conflicts with windows.h
+
 #ifndef WSAPROTOCOL_LEN
 #define WSAPROTOCOL_LEN  255
 struct WSAPROTOCOL_INFOW_COMPAT {
@@ -2228,7 +2158,7 @@ struct WSAPROTOCOL_INFOW_COMPAT {
     DWORD   dwProviderFlags;
     GUID    ProviderId;
     DWORD   dwCatalogEntryId;
-    DWORD   ProtocolChain[8];   // WSAPROTOCOLCHAIN is 4+8*4 = 36 bytes but we just need the entry
+    DWORD   ProtocolChain[8];
     int     iVersion;
     int     iAddressFamily;
     int     iMaxSockAddr;
@@ -2246,8 +2176,7 @@ using WSCEnumProtocolsFn    = int  (WINAPI*)(LPINT, WSAPROTOCOL_INFOW_COMPAT*, L
 using WSCGetProviderPathFn  = int  (WINAPI*)(LPGUID, WCHAR*, LPINT, LPINT);
 #endif
 
-// Check Winsock LSP chain for non-Microsoft providers (hijack indicator).
-// Uses GetProcAddress to avoid header conflicts with ws2spi.h.
+
 static void CollectLspFindings(std::vector<ScannerUI::GenericBypassFinding>& out) {
     HMODULE ws2 = GetModuleHandleW(L"ws2_32.dll");
     if (!ws2) ws2 = LoadLibraryW(L"ws2_32.dll");
@@ -2273,10 +2202,10 @@ static void CollectLspFindings(std::vector<ScannerUI::GenericBypassFinding>& out
     for (int i = 0; i < count; ++i) {
         const auto& p = proto[i];
 
-        // Primary filter: cryptographic — resolve the provider DLL path via the
-        // provider GUID and verify Authenticode + location. This correctly exempts
-        // legitimate Windows features like "Hyper-V RAW" and "AF_UNIX" (WSL) whose
-        // backing DLLs are Microsoft-signed in System32, regardless of protocol name.
+
+
+
+
         if (WSCGetPath) {
             WCHAR dllBuf[MAX_PATH * 2] = {};
             INT   dllLen = (INT)std::size(dllBuf);
@@ -2289,11 +2218,11 @@ static void CollectLspFindings(std::vector<ScannerUI::GenericBypassFinding>& out
                 auto cls = DetectionFilter::ClassifyPath(dllPath);
                 if (cls == DetectionFilter::PathClass::SystemTrusted &&
                     DetectionFilter::IsTrustedSignedCached(dllPath))
-                    continue;  // Microsoft-signed DLL in System32 → legitimate Windows LSP
+                    continue;
             }
         }
 
-        // Fallback name-based filter (when WSCGetProviderPath unavailable or fails).
+
         std::wstring provNameUp = DetectionFilter::UpperW(std::wstring(p.szProtocol));
         if (provNameUp.find(L"MICROSOFT") != std::wstring::npos ||
             provNameUp.find(L"MSWSOCK")   != std::wstring::npos ||
@@ -2476,15 +2405,15 @@ static void CollectSysmonStructuralGaps(std::vector<ScannerUI::GenericBypassFind
 
 std::vector<ScannerUI::GenericBypassFinding> CollectGenericBypassFindings(std::string& status) {
     std::vector<ScannerUI::GenericBypassFinding> findings;
-    ScanNtdllStubIntegrity(findings);        // NTDLL hook detection (internal)
+    ScanNtdllStubIntegrity(findings);
     CollectHdPlayerExternalHandles(findings);
-    CollectGraphicsHookFindings(findings);   // content-based, no name/path filter
-    ScanIatHooks(findings);                  // IAT hook in emulator processes
-    ScanVulkanLayers(findings);              // Vulkan implicit layer abuse
-    ScanDxgiVtableIntegrity(findings);       // D3D/DXGI VTable overwrite
-    ScanDuplicateGraphicsModules(findings);  // duplicated/sideloaded opengl32/d3d9/dxgi/...
-    ScanGraphicsStringsInAnonMemory(findings); // chams loader em RWX privado fora de modulo
-    ScanThreadsWithGraphicsContext(findings);  // threads cujo start carrega strings de OpenGL/WGL
+    CollectGraphicsHookFindings(findings);
+    ScanIatHooks(findings);
+    ScanVulkanLayers(findings);
+    ScanDxgiVtableIntegrity(findings);
+    ScanDuplicateGraphicsModules(findings);
+    ScanGraphicsStringsInAnonMemory(findings);
+    ScanThreadsWithGraphicsContext(findings);
     CollectSuspiciousNamedPipes(findings);
     CollectLspFindings(findings);
     CollectAntivirusExclusionFindings(findings);
@@ -2493,10 +2422,10 @@ std::vector<ScannerUI::GenericBypassFinding> CollectGenericBypassFindings(std::s
     CollectSysmonAvailabilityGaps(findings);
     CollectSysmonStructuralGaps(findings);
 
-    // Backstop for detectors intentionally left out of scope for this precision pass
-    // (named pipes, LSP, event-log/sysmon handlers, AV removal, HD-Player external
-    // handles) — mirrors the fallback convention in scanner_files.cpp. Only fills
-    // fields left empty by the detector, so it's a no-op for everything above.
+
+
+
+
     for (auto& finding : findings) {
         if (finding.ruleId.empty())
             finding.ruleId = "GENERIC_BYPASS." + finding.type;

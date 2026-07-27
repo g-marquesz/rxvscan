@@ -9,14 +9,11 @@ static std::wstring Utf8ToWide(const std::string& s) {
     return out;
 }
 
-// Returns the last path component (filename), wide version.
 static std::wstring BaseNameW(const std::wstring& path) {
     size_t p = path.find_last_of(L"\\/");
     return (p == std::wstring::npos) ? path : path.substr(p + 1);
 }
 
-// Builds a unique destination path in samplesDir for a given source basename.
-// Adds _2, _3, ... suffix before the extension if the name is already taken.
 static std::wstring UniqueSamplePath(const std::wstring& samplesDir,
                                      const std::string& severity,
                                      const std::wstring& srcBasename) {
@@ -24,7 +21,7 @@ static std::wstring UniqueSamplePath(const std::wstring& samplesDir,
     std::wstring candidate = samplesDir + L"\\" + prefix;
     if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES)
         return candidate;
-    // Collision — insert suffix before extension
+
     size_t dot = prefix.rfind(L'.');
     std::wstring stem = (dot == std::wstring::npos) ? prefix : prefix.substr(0, dot);
     std::wstring ext  = (dot == std::wstring::npos) ? L""    : prefix.substr(dot);
@@ -33,10 +30,9 @@ static std::wstring UniqueSamplePath(const std::wstring& samplesDir,
         if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES)
             return candidate;
     }
-    return candidate; // fallback (very unlikely)
+    return candidate;
 }
 
-// Tries to copy srcPath (UTF-8) to samplesDir. Returns true on success.
 static bool CopyFileTo(const std::string& srcPathUtf8,
                        const std::string& severity,
                        const std::wstring& samplesDir) {
@@ -49,7 +45,6 @@ static bool CopyFileTo(const std::string& srcPathUtf8,
     return CopyFileW(src.c_str(), dst.c_str(), FALSE) != 0;
 }
 
-// Dumps the first 512 bytes of PhysicalDrive0 to samplesDir\PhysicalDrive0_MBR.bin.
 static void DumpMbrSector(const std::wstring& samplesDir) {
     HANDLE h = CreateFileW(L"\\\\.\\PhysicalDrive0", GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -68,8 +63,6 @@ static void DumpMbrSector(const std::wstring& samplesDir) {
     WriteFile(hOut, sector, 512, &written, nullptr);
     CloseHandle(hOut);
 }
-
-// ── Report text helpers ───────────────────────────────────────────────────────
 
 static void WriteSep(std::ofstream& f) {
     f << "================================================================================\n";
@@ -99,7 +92,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
     f << "HWID      : " << d.hwid << "\n";
     WriteSep(f);
 
-    // EFI Cheat Detect
+
     WriteSection(f, "EFI CHEAT DETECT", d.efiCheatStatus);
     if (d.efiCheats.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.efiCheats) {
@@ -114,7 +107,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "\n";
     }
 
-    // Driver Integrity
+
     WriteSection(f, "DRIVER INTEGRITY", d.driverIntegrityStatus);
     if (d.driverIntegrity.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.driverIntegrity) {
@@ -127,7 +120,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "\n";
     }
 
-    // Kernel Drivers
+
     WriteSection(f, "KERNEL DRIVERS", d.kernelDriverStatus);
     if (d.kernelDrivers.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.kernelDrivers) {
@@ -137,7 +130,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail: " << x.detail << "\n\n";
     }
 
-    // Kernel Anomalies
+
     WriteSection(f, "KERNEL ANOMALIES", d.kernelAnomalyStatus);
     if (d.kernelAnomalies.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.kernelAnomalies) {
@@ -148,7 +141,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail: " << x.detail << "\n\n";
     }
 
-    // Registry Persistence
+
     WriteSection(f, "REGISTRY PERSISTENCE", d.registryStatus);
     if (d.registryFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.registryFindings) {
@@ -159,7 +152,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Reason: " << x.reason << "\n\n";
     }
 
-    // CLSID Hijack
+
     WriteSection(f, "CLSID HIJACK", d.clsidStatus);
     if (d.clsidFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.clsidFindings) {
@@ -169,7 +162,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Reason: " << x.reason << "\n\n";
     }
 
-    // Generic Bypass
+
     WriteSection(f, "GENERIC BYPASS", d.genericBypassStatus);
     if (d.genericBypass.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.genericBypass) {
@@ -185,7 +178,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "\n";
     }
 
-    // Stream Mods
+
     WriteSection(f, "STREAM MODS", d.streamModStatus);
     if (d.streamModFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.streamModFindings) {
@@ -195,7 +188,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail:  " << x.detail << "\n\n";
     }
 
-    // DeepScan
+
     WriteSection(f, "DEEPSCAN", d.deepScanStatus);
     if (d.deepScanFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.deepScanFindings) {
@@ -205,7 +198,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail:  " << x.detail << "\n\n";
     }
 
-    // Remote Ports
+
     WriteSection(f, "REMOTE PORTS", d.remotePortStatus);
     if (d.remotePortFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.remotePortFindings) {
@@ -215,7 +208,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail:  " << x.detail << "\n\n";
     }
 
-    // Timeline
+
     WriteSection(f, "TIMELINE CORRELATION", d.timelineStatus);
     if (d.timelineFindings.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.timelineFindings) {
@@ -225,7 +218,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail: " << x.detail << "\n\n";
     }
 
-    // BAM
+
     WriteSection(f, "BAM DETECTIONS", "");
     if (d.bam.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.bam) {
@@ -236,7 +229,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Reason: " << x.reason << "\n\n";
     }
 
-    // Prefetch
+
     WriteSection(f, "PREFETCH", "");
     if (d.prefetch.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.prefetch) {
@@ -246,7 +239,7 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "\n";
     }
 
-    // USN Anomalies
+
     WriteSection(f, "USN ANOMALIES", d.usnAnomalyStatus);
     if (d.usnAnomalies.empty()) { f << "  (none)\n"; }
     for (const auto& x : d.usnAnomalies) {
@@ -260,14 +253,12 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
     f << "End of report.\n";
 }
 
-// ── Main export function ──────────────────────────────────────────────────────
-
 void ExportScanReportToZ(ScannerUI::ScanData& data) {
-    // Only export if Z:\ is accessible
+
     if (GetFileAttributesW(L"Z:\\") == INVALID_FILE_ATTRIBUTES)
         return;
 
-    // Build timestamped directory name
+
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     wchar_t dirName[64] = {};
@@ -284,47 +275,47 @@ void ExportScanReportToZ(ScannerUI::ScanData& data) {
 
     data.terminalLog.push_back(std::string("[EXPORT] Exportando para ") + dirUtf8);
 
-    // 1. Write text report
+
     WriteReport(data, outDir);
 
-    // 2. Copy suspicious files to samples/
+
     int copied = 0;
 
-    // All EFI findings (regardless of suspicious flag — user wants to inspect them)
+
     for (const auto& x : data.efiCheats) {
-        // Skip MBR/NVRAM virtual paths — they have no real file to copy
+
         if (x.path.find("PhysicalDrive") != std::string::npos) continue;
         if (x.path.find("NVRAM::") != std::string::npos) continue;
         if (CopyFileTo(x.path, x.severity, samplesDir)) ++copied;
     }
 
-    // Suspicious driver integrity findings
+
     for (const auto& x : data.driverIntegrity) {
         if (x.suspicious && CopyFileTo(x.path, x.severity, samplesDir)) ++copied;
     }
 
-    // Suspicious kernel drivers
+
     for (const auto& x : data.kernelDrivers) {
         if (x.suspicious && CopyFileTo(x.path, x.severity, samplesDir)) ++copied;
     }
 
-    // Suspicious timeline correlations
+
     for (const auto& x : data.timelineFindings) {
         if (x.suspicious && CopyFileTo(x.path, x.severity, samplesDir)) ++copied;
     }
 
-    // Suspicious BAM entries
+
     for (const auto& x : data.bam) {
         if (x.suspicious && CopyFileTo(x.path, "", samplesDir)) ++copied;
     }
 
-    // Prefetch entries with HIGH/MEDIUM severity
+
     for (const auto& x : data.prefetch) {
         if ((x.severity == "HIGH" || x.severity == "MEDIUM") &&
             CopyFileTo(x.file, x.severity, samplesDir)) ++copied;
     }
 
-    // 3. Dump MBR sector 0 if any EFI finding mentions a physical drive
+
     bool hasMbrFinding = false;
     for (const auto& x : data.efiCheats)
         if (x.path.find("PhysicalDrive") != std::string::npos) { hasMbrFinding = true; break; }

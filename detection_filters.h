@@ -28,17 +28,13 @@
 #include <unordered_set>
 #include <vector>
 
-// Defined in scanner_platform.cpp, declared in scanner_core.h — forward-declared here
-// because detection_filters.h is included by scanner_core.h before that declaration.
 std::wstring DevicePathToDosPath(const std::wstring& path);
 
 namespace DetectionFilter {
 
-
 constexpr double kPackedEntropy = 7.2;
 constexpr double kCodeLow       = 4.5;
 constexpr double kCodeHigh      = 7.0;
-
 
 inline std::wstring UpperW(std::wstring s) {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -67,7 +63,6 @@ inline std::string EntropyToStr(double e) {
     return buf;
 }
 
-
 inline double ShannonEntropy(const unsigned char* data, size_t len) {
     if (!data || len == 0)
         return 0.0;
@@ -83,8 +78,6 @@ inline double ShannonEntropy(const unsigned char* data, size_t len) {
     }
     return entropy;
 }
-
-
 
 inline double FileEntropySample(const std::wstring& path, size_t maxBytes = 256 * 1024) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
@@ -109,10 +102,6 @@ inline double FileEntropySample(const std::wstring& path, size_t maxBytes = 256 
     return ShannonEntropy(buf.data(), read);
 }
 
-
-
-
-
 inline std::string FindSuspiciousStringInEfi(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -128,7 +117,6 @@ inline std::string FindSuspiciousStringInEfi(const std::wstring& path) {
     if (rd == 0)
         return "";
 
-
     static const char* kSuspiciousTokens[] = {
         "eac bypass", "battleye bypass", "vanguard bypass", "anti-cheat bypass",
         "anticheat bypass", "kernel hack", "hwid spoof", "cheat engine",
@@ -136,7 +124,6 @@ inline std::string FindSuspiciousStringInEfi(const std::wstring& path) {
         "no recoil", "bunnyhop", "ring0 exploit", "hypervisor bypass",
         "easyanticheat", "be bypass", "faceit bypass", nullptr
     };
-
 
     std::string current;
     current.reserve(256);
@@ -160,8 +147,6 @@ inline std::string FindSuspiciousStringInEfi(const std::wstring& path) {
     }
     return "";
 }
-
-
 
 inline double FileEntropyMultiSample(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
@@ -208,7 +193,6 @@ inline double FileEntropyMultiSample(const std::wstring& path) {
     return maxE;
 }
 
-
 inline double ProcessRegionEntropy(HANDLE process, const void* base, size_t regionSize,
                                    size_t maxBytes = 64 * 1024) {
     size_t toRead = regionSize < maxBytes ? regionSize : maxBytes;
@@ -220,8 +204,6 @@ inline double ProcessRegionEntropy(HANDLE process, const void* base, size_t regi
         return -1.0;
     return ShannonEntropy(buf.data(), (size_t)got);
 }
-
-
 
 inline bool HasPEHeader(HANDLE process, const void* base) {
     unsigned char buf[4096];
@@ -237,13 +219,7 @@ inline bool HasPEHeader(HANDLE process, const void* base) {
            buf[peOffset + 2] == 0 && buf[peOffset + 3] == 0;
 }
 
-
-// Content-based graphics DLL identification.
-// Parses the PE export directory from a buffer read from remote process memory and
-// returns true if ANY well-known graphics API symbol is exported.
-// Use instead of name/path-based checks — cheats cannot fake exported symbol lists
-// without also implementing the expected function behavior.
-inline bool ExportsGraphicsSymbol(const BYTE* peBase, SIZE_T peSize, uintptr_t /*imageBase*/) {
+inline bool ExportsGraphicsSymbol(const BYTE* peBase, SIZE_T peSize, uintptr_t ) {
     if (!peBase || peSize < 0x40) return false;
     if (peBase[0] != 'M' || peBase[1] != 'Z') return false;
     LONG peOff = *reinterpret_cast<const LONG*>(peBase + 0x3C);
@@ -322,25 +298,23 @@ inline bool ExportsGraphicsSymbol(const BYTE* peBase, SIZE_T peSize, uintptr_t /
     return false;
 }
 
-// Returns true if bytes match a known valid Nt*/Zw* x64 syscall stub (clean, unhooked).
-// Used to validate on-disk ntdll stubs before comparing against in-memory versions.
 inline bool IsValidSyscallStub(const BYTE* bytes, size_t len) {
     if (!bytes || len < 8) return false;
-    // Pattern A (SysWhispers2/3): 4C 8B D1  B8 ?? ?? 00 00  0F 05  C3
+
     if (len >= 11 && bytes[0]==0x4C && bytes[1]==0x8B && bytes[2]==0xD1
         && bytes[3]==0xB8 && bytes[6]==0x00 && bytes[7]==0x00
         && bytes[8]==0x0F && bytes[9]==0x05 && bytes[10]==0xC3)
         return true;
-    // Pattern B (simple): B8 ?? ?? 00 00  0F 05  C3
+
     if (len >= 8 && bytes[0]==0xB8 && bytes[3]==0x00 && bytes[4]==0x00
         && bytes[5]==0x0F && bytes[6]==0x05 && bytes[7]==0xC3)
         return true;
-    // Pattern C (HellsGate): 49 89 CA  B8 ?? ?? 00 00  0F 05  C3
+
     if (len >= 11 && bytes[0]==0x49 && bytes[1]==0x89 && bytes[2]==0xCA
         && bytes[3]==0xB8 && bytes[6]==0x00 && bytes[7]==0x00
         && bytes[8]==0x0F && bytes[9]==0x05 && bytes[10]==0xC3)
         return true;
-    // Pattern D (SysWhispers1): B8 ?? ?? 00 00  BA 08 03 FE 7F  0F 05  C3
+
     if (len >= 13 && bytes[0]==0xB8 && bytes[3]==0x00 && bytes[4]==0x00
         && bytes[5]==0xBA && bytes[6]==0x08 && bytes[7]==0x03
         && bytes[8]==0xFE && bytes[9]==0x7F
@@ -391,7 +365,6 @@ inline const SystemRoots& Roots() {
     return r;
 }
 
-
 inline bool PathIsUnder(const std::wstring& path, const std::wstring& rootUpper) {
     if (rootUpper.empty() || path.empty())
         return false;
@@ -434,7 +407,6 @@ inline PathClass ClassifyPath(const std::wstring& path) {
 
     const SystemRoots& r = Roots();
 
-
     if (PathIsUnder(up, r.userTemp) || PathIsUnder(up, r.windirTemp) ||
         PathIsUnder(up, r.packageCache) || PathIsUnder(up, r.recycleBin) ||
         (!r.localAppData.empty() && PathIsUnder(up, r.localAppData + L"\\TEMP")))
@@ -471,7 +443,6 @@ inline const char* PathClassName(PathClass c) {
     }
 }
 
-// Centralized severity ordering (HIGH=0 best, FLAG=3 least severe).
 inline int SeverityRank(const std::string& s) {
     if (s == "HIGH")   return 0;
     if (s == "MEDIUM") return 1;
@@ -484,8 +455,6 @@ inline bool SeverityCompare(const std::string& a, const std::string& b) {
     return SeverityRank(a) < SeverityRank(b);
 }
 
-
-// Renamed: name match is NOT a trust signal. Use ExportsGraphicsSymbol for content-based checks.
 inline bool IsNamedLikeGraphicsRuntime(const std::wstring& fileName) {
     std::wstring f = UpperW(fileName);
     static const std::unordered_set<std::wstring> names = {
@@ -517,9 +486,6 @@ inline bool IsNamedLikeGraphicsRuntime(const std::wstring& fileName) {
            f.find(L"ATIG") != std::wstring::npos;
 }
 
-
-
-// Renamed: name match is NOT a trust signal. Use certificate check for overlay trust.
 inline bool IsNamedLikeOverlay(const std::wstring& fileName) {
     std::wstring f = UpperW(fileName);
     static const std::unordered_set<std::wstring> names = {
@@ -553,9 +519,6 @@ inline bool IsKnownEmulatorServiceName(const std::wstring& fileName) {
     return names.find(f) != names.end();
 }
 
-
-
-
 inline bool IsKnownEmulatorRuntime(const std::wstring& exeName) {
     std::wstring f = UpperW(exeName);
     static const std::unordered_set<std::wstring> names = {
@@ -567,7 +530,6 @@ inline bool IsKnownEmulatorRuntime(const std::wstring& exeName) {
     };
     return names.find(f) != names.end();
 }
-
 
 struct RegionVerdict {
     bool keep = true;
@@ -583,25 +545,17 @@ inline RegionVerdict ClassifyExecRegion(bool writeExec, size_t size, double entr
              " size=" + std::to_string((unsigned long long)size) +
              (privateMem ? " private" : " mapped");
 
-
-
     if (hasPeHeader && privateMem) {
         v.severity = "HIGH";
         v.note += " | PE header detectado (DLL reflective/injetada)";
         return v;
     }
 
-
-
-
     if (!privateMem && !hasPeHeader) {
         v.keep = false;
         v.note += " | regiao mapeada sem PE header (descartado)";
         return v;
     }
-
-
-
 
     if (isEmulatorProcess && privateMem && !hasPeHeader) {
         v.keep = false;
@@ -611,10 +565,10 @@ inline RegionVerdict ClassifyExecRegion(bool writeExec, size_t size, double entr
         return v;
     }
 
-    const size_t kJitMin    = 2ull  * 1024 * 1024;   // 2 MB — JIT threshold
-    const size_t kMinReport = 16ull * 1024;            // 16 KB — minimum flaggable region
+    const size_t kJitMin    = 2ull  * 1024 * 1024;
+    const size_t kMinReport = 16ull * 1024;
 
-    // High entropy always wins — packed/shellcode regardless of other attributes.
+
     if (entropy >= 0.0 && entropy >= kPackedEntropy) {
         v.severity = "HIGH";
         v.note += " | alta entropia (packed/cifrado)";
@@ -623,22 +577,22 @@ inline RegionVerdict ClassifyExecRegion(bool writeExec, size_t size, double entr
 
     bool codeLike = entropy >= kCodeLow && entropy <= kCodeHigh;
 
-    // RWX regions (write+exec simultaneously) are always suspicious.
+
     if (writeExec) {
         if (privateMem && size >= kJitMin && codeLike) {
             v.severity = "MEDIUM";
             v.note += " | RWX grande estilo cache JIT";
             return v;
         }
-        // Small RWX with no entropy info → possible inline hook stub.
+
         if (size < kMinReport && (entropy < 0.0 || entropy < kCodeLow)) {
             v.keep = false;
             v.note += " | RWX stub muito pequeno sem codigo (descartado)";
             return v;
         }
-        // Medium-sized RWX (16 KB – 2 MB) with code-like entropy (not packed) →
-        // could be a small V8/CLR JIT page. Keep as MEDIUM rather than HIGH to
-        // reduce false positives; cross-reference with gfxHookDests for upgrade.
+
+
+
         if (privateMem && !hasPeHeader && codeLike && size < kJitMin) {
             v.severity = "MEDIUM";
             v.note += " | RWX medio com entropia de codigo (possivel JIT inicial)";
@@ -649,43 +603,40 @@ inline RegionVerdict ClassifyExecRegion(bool writeExec, size_t size, double entr
         return v;
     }
 
-    // Large RX region with code-like entropy → likely a JIT cache; discard.
+
     if (privateMem && size >= kJitMin && codeLike) {
         v.keep = false;
         v.note += " | provavel cache JIT (descartado)";
         return v;
     }
 
-    // Anything below minimum size with no special marker is noise.
+
     if (size < kMinReport) {
         v.keep = false;
         v.note += " | regiao muito pequena (descartado)";
         return v;
     }
 
-    // RX region with code-like entropy but no other indicator → discard.
-    // Legitimate apps frequently have RX allocations for trampolines, CLR, V8, etc.
+
+
     if (codeLike) {
         v.keep = false;
         v.note += " | RX com entropia normal sem indicador adicional (descartado)";
         return v;
     }
 
-    // Low entropy, readable region — not shellcode-like; discard.
+
     if (entropy >= 0.0 && entropy < kCodeLow) {
         v.keep = false;
         v.note += " | entropia baixa, nao e codigo (descartado)";
         return v;
     }
 
-    // Unknown entropy (read failed) — keep only if region is large enough to matter.
+
     v.keep = false;
     v.note += " | sem indicador conclusivo (descartado)";
     return v;
 }
-
-
-
 
 struct EfiPeInfo {
     bool     valid              = false;
@@ -693,18 +644,16 @@ struct EfiPeInfo {
     size_t   overlaySize        = 0;
     bool     badSections        = false;
     uint16_t numSections        = 0;
-    uint32_t peTimestamp        = 0;      // PE COFF timestamp (seconds since Unix epoch)
-    uint32_t storedChecksum     = 0;      // Optional Header CheckSum field
-    // Hook/tamper detection
-    bool        noRichHeader       = false;  // MSVC Rich header absent (patcher indicator)
-    bool        epHooked           = false;  // Entry point begins with JMP/trampoline pattern
-    bool        injectedSection    = false;  // Executable section name outside MSVC/UEFI whitelist
-    bool        dataDirOutOfBounds = false;  // Import or Export DataDirectory RVA outside sections
-    std::string epHookDetail;                // Pattern description (e.g. "JMP rel32")
-    std::string injectedSecName;             // Name of the suspicious section
+    uint32_t peTimestamp        = 0;
+    uint32_t storedChecksum     = 0;
+
+    bool        noRichHeader       = false;
+    bool        epHooked           = false;
+    bool        injectedSection    = false;
+    bool        dataDirOutOfBounds = false;
+    std::string epHookDetail;
+    std::string injectedSecName;
 };
-
-
 
 inline bool IsValidEfiSubsystem(uint16_t s) {
     return s >= 10 && s <= 13;
@@ -723,10 +672,6 @@ inline const char* EfiSubsystemName(uint16_t s) {
     }
 }
 
-
-
-
-
 inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     EfiPeInfo info;
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
@@ -741,7 +686,7 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     unsigned char buf[4096] = {};
     DWORD read = 0;
     ReadFile(h, buf, sizeof(buf), &read, nullptr);
-    // NOTE: handle kept open for entry-point byte read below; CloseHandle at end.
+
 
     if (read < 0x40 || buf[0] != 'M' || buf[1] != 'Z') {
         CloseHandle(h); return info;
@@ -768,10 +713,10 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     if (subsOff + 2 <= read)
         info.subsystem = *reinterpret_cast<uint16_t*>(buf + subsOff);
 
-    // ── Rich header check ─────────────────────────────────────────────────────
-    // MSVC linker always inserts "Rich" marker between 0x40 and e_lfanew.
-    // Absence on a Microsoft-produced binary indicates the file was processed by
-    // a non-MSVC patcher tool (common step in bootloader hook installation).
+
+
+
+
     if ((DWORD)peOff > 0x80) {
         bool foundRich = false;
         for (DWORD ri = 0x40; ri + 4 <= (DWORD)peOff && ri + 4 <= read; ++ri) {
@@ -782,12 +727,12 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
         if (!foundRich) info.noRichHeader = true;
     }
 
-    // ── Entry point RVA (same offset for PE32 and PE32+) ─────────────────────
+
     uint32_t entryRVA = 0;
     if ((DWORD)peOff + 44 <= read)
         entryRVA = *reinterpret_cast<uint32_t*>(buf + peOff + 40);
 
-    // ── DataDirectory base (offset differs between PE32 and PE32+) ───────────
+
     uint16_t optMagic = 0;
     if ((DWORD)peOff + 26 <= read)
         optMagic = *reinterpret_cast<uint16_t*>(buf + peOff + 24);
@@ -799,7 +744,7 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
             ddRva[di] = *reinterpret_cast<uint32_t*>(buf + ddOff);
     }
 
-    // ── Section loop ─────────────────────────────────────────────────────────
+
     struct SecEntry { uint32_t va, vsz, ptrRaw, sizeRaw; };
     SecEntry sections[96] = {};
 
@@ -810,8 +755,8 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     static const char* kBadNames[] = {
         "packed", "themida", ".vmp", "protect", "petite", "upx", ".ndata", "sforce", nullptr
     };
-    // Executable section names expected from MSVC/EDK2 EFI toolchains.
-    // Anything outside this set with the EXECUTE flag is considered injected.
+
+
     static const char* kGoodExecNames[] = {
         ".text", ".ntext", ".code", "init", ".textbss", ".gfids", ".gehcont", nullptr
     };
@@ -847,7 +792,7 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
         if ((ch & 0x80000000u) && (ch & 0x20000000u))
             info.badSections = true;
 
-        // Injected section: executable flag + name not in whitelist
+
         if (!info.injectedSection && (ch & 0x20000000u) && name[0]) {
             char low[9] = {};
             for (int j = 0; j < 8; ++j) low[j] = (char)tolower((unsigned char)name[j]);
@@ -868,7 +813,7 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     if (lastEnd > 0 && fileSize.QuadPart > (LONGLONG)lastEnd)
         info.overlaySize = (size_t)(fileSize.QuadPart - lastEnd);
 
-    // ── DataDirectory bounds check ────────────────────────────────────────────
+
     for (int di = 0; di < 2; ++di) {
         if (ddRva[di] == 0) continue;
         bool inSec = false;
@@ -881,7 +826,7 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
         if (!inSec) { info.dataDirOutOfBounds = true; break; }
     }
 
-    // ── Entry point hook pattern detection ───────────────────────────────────
+
     if (entryRVA != 0) {
         DWORD epFileOff = 0;
         for (uint16_t i = 0; i < numSec; ++i) {
@@ -922,10 +867,6 @@ inline EfiPeInfo AnalyzeEfiPe(const std::wstring& path) {
     return info;
 }
 
-
-// Returns true if the PE's stored CheckSum differs from the computed value,
-// indicating the file was modified without updating the checksum (binary patching).
-// Returns false when storedChecksum == 0 (field not set by the linker).
 inline bool CheckPeChecksumMismatch(const std::wstring& path, uint32_t storedChecksum) {
     if (storedChecksum == 0)
         return false;
@@ -935,7 +876,6 @@ inline bool CheckPeChecksumMismatch(const std::wstring& path, uint32_t storedChe
     return headerSum != computedSum;
 }
 
-
 inline bool IsEmbeddedSigned(const std::wstring& path) {
     WINTRUST_FILE_INFO fileInfo = {};
     fileInfo.cbStruct = sizeof(fileInfo);
@@ -944,9 +884,9 @@ inline bool IsEmbeddedSigned(const std::wstring& path) {
     WINTRUST_DATA wd = {};
     wd.cbStruct = sizeof(wd);
     wd.dwUIChoice = WTD_UI_NONE;
-    // WTD_REVOKE_WHOLECHAIN checks the cached CRL/OCSP data for the entire chain.
-    // Combined with WTD_CACHE_ONLY_URL_RETRIEVAL this avoids network round-trips while
-    // still catching revoked certificates whose status is already in the local cache.
+
+
+
     wd.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
     wd.dwUnionChoice = WTD_CHOICE_FILE;
     wd.pFile = &fileInfo;
@@ -960,14 +900,6 @@ inline bool IsEmbeddedSigned(const std::wstring& path) {
     WinVerifyTrust(nullptr, &action, &wd);
     return status == ERROR_SUCCESS;
 }
-
-
-
-
-
-
-
-
 
 inline bool IsCatalogSigned(const std::wstring& path) {
     WINTRUST_FILE_INFO fileInfo = {};
@@ -1001,13 +933,11 @@ static bool RunWithTimeout(Func&& fn, unsigned timeoutMs) {
     return false;
 }
 
-// Tri-state result: true=verified signed, false=verified unsigned, nullopt=timeout/unknown.
-// The cache layer uses this so a transient timeout does NOT poison the cache.
 inline std::optional<bool> IsTrustedSignedTriState(const std::wstring& path) {
     if (path.empty())
         return false;
     auto p = std::make_shared<std::wstring>(path);
-    auto result = std::make_shared<std::atomic<int>>(-1);  // -1 pending, 0 false, 1 true
+    auto result = std::make_shared<std::atomic<int>>(-1);
     std::packaged_task<bool()> task([p, result]() {
         bool ok = IsEmbeddedSigned(*p) || IsCatalogSigned(*p);
         result->store(ok ? 1 : 0);
@@ -1015,8 +945,8 @@ inline std::optional<bool> IsTrustedSignedTriState(const std::wstring& path) {
     });
     auto future = task.get_future();
     std::thread(std::move(task)).detach();
-    // 8000ms gives the catalog subsystem room on first-touch cold paths
-    // (CryptCATAdmin warm-up + slow disk). On healthy machines this returns in <50ms.
+
+
     if (future.wait_for(std::chrono::milliseconds(8000)) == std::future_status::ready)
         return future.get();
     return std::nullopt;
@@ -1027,12 +957,6 @@ inline bool IsTrustedSigned(const std::wstring& path) {
     return r.value_or(false);
 }
 
-// Fingerprint (size + last-write-time) used to validate cached Authenticode/publisher
-// results across scans: a cache hit is only honored if the file on disk still matches
-// the fingerprint recorded when it was verified. If the file changed (e.g. malware
-// patched a binary between two scans in the same session) the fingerprint differs and
-// the entry is treated as a miss, so it gets re-verified — caching never hides a
-// genuine change. Returns 0 (never cached) if the file can't be stat'd.
 inline uint64_t GetFileFingerprint(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA attr = {};
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attr))
@@ -1045,7 +969,7 @@ inline uint64_t GetFileFingerprint(const std::wstring& path) {
     mtime.HighPart = attr.ftLastWriteTime.dwHighDateTime;
     uint64_t h = size.QuadPart;
     h ^= mtime.QuadPart + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
-    return h != 0 ? h : 1; // reserve 0 for "unknown/uncacheable"
+    return h != 0 ? h : 1;
 }
 
 namespace detail_sigcache {
@@ -1056,13 +980,6 @@ namespace detail_sigcache {
     }
 }
 
-// Cache for Authenticode results, valid across scans within the same process lifetime
-// (see GetFileFingerprint for the change-detection rule that keeps this correct).
-// Eliminates repeated WinVerifyTrust calls on the same, unchanged path.
-// Only definitive results (signed=true or genuinely unsigned=false) are cached.
-// Timeouts return false to the caller but are NOT cached — otherwise a single slow
-// catalog warm-up would poison the cache and falsely mark hundreds of catalog-signed
-// System32 DLLs (OPENGL32.dll, GLU32.dll, etc.) as unsigned for the rest of the scan.
 inline bool IsTrustedSignedCached(const std::wstring& path) {
     if (path.empty())
         return false;
@@ -1083,33 +1000,25 @@ inline bool IsTrustedSignedCached(const std::wstring& path) {
     return result;
 }
 
-// Kept for explicit "force full rescan" use (e.g. process startup); no longer required
-// between scans in the same session since entries self-invalidate on file change.
 inline void ClearSignatureCache() {
     std::lock_guard<std::mutex> lk(detail_sigcache::Mtx());
     detail_sigcache::Map().clear();
 }
 
 struct AddressModuleTrust {
-    bool resolved = false;        // a live file mapping backs this address (MEM_IMAGE/MEM_MAPPED)
-    bool signedTrusted = false;   // IsTrustedSignedCached(path)
-    bool exportsGraphics = false; // content-based ExportsGraphicsSymbol on the in-memory header
-    std::wstring path;            // resolved DOS path; empty if unresolved
+    bool resolved = false;
+    bool signedTrusted = false;
+    bool exportsGraphics = false;
+    std::wstring path;
 };
 
-// Resolves the on-disk image (if any) backing the memory region containing `addr` in
-// `process`, INDEPENDENT of any previously-captured module snapshot (CollectProcessModules
-// is a point-in-time snapshot; a legitimately signed DLL loaded after that snapshot, or
-// manually mapped as a real section, would otherwise look identical to injected shellcode).
-// Pure MEM_PRIVATE memory has no backing file and correctly returns resolved=false — that
-// is NOT itself a trust signal, only the absence of one.
 inline AddressModuleTrust ResolveModuleTrustAtAddress(HANDLE process, uintptr_t addr) {
     AddressModuleTrust result;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQueryEx(process, (LPCVOID)addr, &mbi, sizeof(mbi)) != sizeof(mbi))
         return result;
     if (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED)
-        return result; // MEM_PRIVATE — genuinely no backing file
+        return result;
 
     wchar_t devicePath[1024] = {};
     DWORD len = GetMappedFileNameW(process, mbi.AllocationBase, devicePath, (DWORD)std::size(devicePath));
@@ -1139,10 +1048,6 @@ namespace detail_pubcache {
     }
 }
 
-// Returns the Authenticode signer common name (UPPER-CASE) or empty.
-// Cached per path. Used to compare the publisher of a candidate DLL against
-// the publisher of the hosting executable — same-publisher pairs are
-// considered legitimate vendor shipping rather than DLL hijack.
 inline std::wstring GetSignerCommonNameUpperCached(const std::wstring& path) {
     if (path.empty())
         return L"";
@@ -1196,16 +1101,11 @@ inline std::wstring GetSignerCommonNameUpperCached(const std::wstring& path) {
     return name;
 }
 
-// Kept for explicit "force full rescan" use; entries self-invalidate on file change.
 inline void ClearPublisherCache() {
     std::lock_guard<std::mutex> lk(detail_pubcache::Mtx());
     detail_pubcache::Map().clear();
 }
 
-// Returns true for Windows crash dump filter drivers (dump_*.sys).
-// These are loaded by the kernel crash dump subsystem without SCM service
-// registration, without accessible backing files, and without standard
-// catalog verification — all of which are expected and normal behavior.
 inline bool IsCrashDumpDriverName(const std::wstring& name) {
     std::wstring up = UpperW(BaseName(name));
     if (up.size() >= 5 && up.substr(0, 5) == L"DUMP_")
@@ -1218,13 +1118,11 @@ inline bool IsCrashDumpDriverName(const std::wstring& name) {
     return kKnownDump.count(up) > 0;
 }
 
-// P3 — Detect Rich header (MSVC linker artifact between DOS stub and PE header).
-// Absence means the binary was not produced by a standard Microsoft toolchain.
 inline bool HasRichHeader(const uint8_t* data, size_t sz) {
     if (!data || sz < 0x40) return false;
     LONG peOff = *reinterpret_cast<const LONG*>(data + 0x3C);
     if (peOff <= 0x40 || (size_t)peOff > sz) return false;
-    // "Rich" signature (0x52 0x69 0x63 0x68) appears somewhere between DOS stub and PE header
+
     for (size_t i = 0x40; i + 4 <= (size_t)peOff; ++i) {
         if (data[i] == 'R' && data[i+1] == 'i' && data[i+2] == 'c' && data[i+3] == 'h')
             return true;
@@ -1232,8 +1130,6 @@ inline bool HasRichHeader(const uint8_t* data, size_t sz) {
     return false;
 }
 
-// P3 — Count readable ASCII strings (>= minLen chars) in a byte buffer.
-// Very few readable strings in the .text section = string obfuscation active.
 inline int CountReadableStrings(const uint8_t* data, size_t sz, size_t minLen = 5) {
     if (!data || sz == 0) return 0;
     int count = 0;
@@ -1251,11 +1147,10 @@ inline int CountReadableStrings(const uint8_t* data, size_t sz, size_t minLen = 
     return count;
 }
 
-// P8 — Anti-analysis pattern profile detected from raw PE bytes.
 struct AntiAnalysisProfile {
-    bool hasRdtscCheck    = false;  // 0x0F 0x31 — RDTSC timing check
-    bool hasCpuidVmCheck  = false;  // 0x0F 0xA2 — CPUID (VM detection)
-    bool hasPebDebugCheck = false;  // fs/gs:[0x30] — manual PEB.BeingDebugged read
+    bool hasRdtscCheck    = false;
+    bool hasCpuidVmCheck  = false;
+    bool hasPebDebugCheck = false;
 };
 
 inline AntiAnalysisProfile ScanAntiAnalysisPatterns(const uint8_t* data, size_t sz) {
@@ -1266,9 +1161,9 @@ inline AntiAnalysisProfile ScanAntiAnalysisPatterns(const uint8_t* data, size_t 
             p.hasRdtscCheck = true;
         if (!p.hasCpuidVmCheck && data[i] == 0x0F && data[i+1] == 0xA2)
             p.hasCpuidVmCheck = true;
-        // fs:[30h] = 64-bit: GS:[60h]; 32-bit: FS:[30h]
-        // pattern: 64 A1 30 00 00 00 00  (mov eax, fs:[30h])
-        // or:      65 48 8B 04 25 60 00  (mov rax, gs:[60h])
+
+
+
         if (!p.hasPebDebugCheck && i + 6 < sz) {
             if (data[i] == 0x64 && data[i+1] == 0xA1 &&
                 data[i+2] == 0x30 && data[i+3] == 0x00)
@@ -1282,30 +1177,25 @@ inline AntiAnalysisProfile ScanAntiAnalysisPatterns(const uint8_t* data, size_t 
     return p;
 }
 
-
-// Centralized cheat service domain list used by generic bypass and sysmon parsers.
-// Matching is case-insensitive (callers should uppercase both sides).
 inline const wchar_t* const kCheatDomains[] = {
-    // Key-auth / loader infrastructure
+
     L"KEYAUTH.WIN",  L"KEYAUTH.ME",  L"KEYAUTH.FUN",
     L"KEYAUTH.ORG",  L"KEYAUTH.APP",
-    // Cheat marketplaces / forums
+
     L"CHEATAUTOMATION.COM", L"UNKNOWNCHEATS.ME", L"MPGH.NET",
     L"GAMEHACKING.ORG",     L"GUIDED-HACKING.COM",
     L"WALLHAX.COM",         L"CHEATER.NINJA",
     L"IWANTCHEATS.NET",     L"AIMJUNKIES.COM",
     L"ELITEPVPERS.COM",     L"HACKFORUMS.NET",
-    // Bypass / loader C2
+
     L"HVPP.IO",         L"RING0LOADER",   L"WTFBYPASS",
     L"FUCKBYPASS",      L"SKIDROW.TO",    L"LC.CX",
     L"LC.WUAZE.COM",    L"BYPASSCHEATS",  L"SPOOFERZONE",
-    // Distribution / cracking
+
     L"CRACKED.IO",
     nullptr
 };
 
-// Returns true if `upperText` contains any entry from kCheatDomains.
-// The caller is expected to uppercase `upperText` before calling.
 inline bool IsCheatDomain(const std::wstring& upperText) {
     for (int i = 0; kCheatDomains[i]; ++i) {
         if (upperText.find(kCheatDomains[i]) != std::wstring::npos)
@@ -1314,10 +1204,6 @@ inline bool IsCheatDomain(const std::wstring& upperText) {
     return false;
 }
 
-// Verifies whether the file's content hash is indexed in any installed Windows .cat catalog.
-// Genuine Windows EFI files (bootmgfw.efi, winload.efi, etc.) are always cataloged.
-// Returns false if the file is not found in any catalog — indicates tampered content
-// even when the Authenticode signature wrapper is still present.
 inline bool IsFileInWindowsCatalog(const std::wstring& path) {
     HCATADMIN hAdmin = nullptr;
     GUID action = DRIVER_ACTION_VERIFY;
@@ -1348,13 +1234,10 @@ inline bool IsFileInWindowsCatalog(const std::wstring& path) {
     return found;
 }
 
-// Tri-state result for catalog lookup so callers can tell "genuinely not cataloged"
-// apart from "could not verify" (admin context/hash failure). Treating the latter as
-// a mismatch produces false positives on perfectly legitimate boot files.
 enum class CatalogState {
-    Found,        // hash is indexed in an installed .cat — authentic
-    NotFound,     // catalog system worked but the hash is absent — possible tampering
-    Unverifiable  // could not acquire catalog context or hash the file — unknown
+    Found,
+    NotFound,
+    Unverifiable
 };
 
 inline CatalogState QueryWindowsCatalogState(const std::wstring& path) {
@@ -1376,14 +1259,14 @@ inline CatalogState QueryWindowsCatalogState(const std::wstring& path) {
                 HCATINFO hCat = CryptCATAdminEnumCatalogFromHash(
                     hAdmin, hash.data(), hashSize, 0, nullptr);
                 if (hCat) {
-                    // Catalog-poisoning hardening: CryptCATAdmin indexes every .cat
-                    // installed under CatRoot. An attacker with admin write can plant
-                    // a forged/self-signed catalog listing arbitrary hashes — the hit
-                    // would otherwise vouch for a malicious DLL. Resolve which .cat
-                    // matched and require it to be Authenticode-trusted AND signed
-                    // by Microsoft (CN starts with "MICROSOFT"). Anything else is
-                    // treated as NotFound, so callers fall through to the regular
-                    // suspicious-DLL flow.
+
+
+
+
+
+
+
+
                     CATALOG_INFO catInfo = {};
                     catInfo.cbStruct = sizeof(catInfo);
                     if (CryptCATCatalogInfoFromContext(hCat, &catInfo, 0) &&
@@ -1409,8 +1292,6 @@ inline CatalogState QueryWindowsCatalogState(const std::wstring& path) {
     return state;
 }
 
-// Computes the SHA-256 hex digest of a file using BCrypt (no network, no trust check).
-// Returns empty string on error. Used to snapshot EFI file content for change detection.
 inline std::string ComputeFileSha256(const std::wstring& path) {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -1449,8 +1330,6 @@ inline std::string ComputeFileSha256(const std::wstring& path) {
     return result;
 }
 
-// SHA-256 of an in-memory buffer. Same BCrypt pattern as ComputeFileSha256.
-// Used for raw disk sector hashing (MBR integrity baseline).
 inline std::string ComputeBufferSha256(const uint8_t* data, size_t size) {
     BCRYPT_ALG_HANDLE  hAlg  = nullptr;
     BCRYPT_HASH_HANDLE hHash = nullptr;
@@ -1478,23 +1357,12 @@ inline std::string ComputeBufferSha256(const uint8_t* data, size_t size) {
     return result;
 }
 
-// ── Strong (trust-verified) publisher identity ───────────────────────────────
-// The plain CN string returned by GetSignerCommonNameUpperCached is read directly
-// from the embedded certificate WITHOUT validating the chain. An attacker can put
-// CN="Microsoft Corporation" on a self-signed / untrusted certificate and earn any
-// "same-publisher" exemption. This struct couples three facts so that a same-publisher
-// decision can require: (1) the file is genuinely Authenticode-trusted (chain builds to
-// a trusted root, not revoked), (2) the leaf CN, and (3) the SHA-1 thumbprint of the
-// chain ROOT. Two files are "the same trusted publisher" only when both are trusted,
-// share the leaf CN, AND chain up to the same root CA — defeating forged-CN spoofing.
 struct VerifiedSignerIdentity {
-    bool         trusted = false;   // WinVerifyTrust (embedded or catalog) succeeded
-    std::wstring cnUpper;           // leaf signer common name, UPPER-CASE
-    std::string  rootThumb;         // SHA-1 thumbprint (hex) of the chain root, lowercase
+    bool         trusted = false;
+    std::wstring cnUpper;
+    std::string  rootThumb;
 };
 
-// Builds the certificate chain for the embedded signer and returns the root thumbprint.
-// Empty when the file is unsigned or the chain cannot be built.
 inline std::string GetSignerRootThumbprint(const std::wstring& path) {
     HCERTSTORE hStore = nullptr;
     HCRYPTMSG  hMsg   = nullptr;
@@ -1558,8 +1426,6 @@ namespace detail_identcache {
     }
 }
 
-// Cached, trust-verified publisher identity. trusted=false leaves CN/root empty so a
-// spoofed CN on an untrusted cert can never match a legitimate identity.
 inline VerifiedSignerIdentity GetVerifiedSignerIdentityCached(const std::wstring& path) {
     VerifiedSignerIdentity id;
     if (path.empty())
@@ -1584,17 +1450,11 @@ inline VerifiedSignerIdentity GetVerifiedSignerIdentityCached(const std::wstring
     return id;
 }
 
-// Kept for explicit "force full rescan" use; entries self-invalidate on file change.
 inline void ClearIdentityCache() {
     std::lock_guard<std::mutex> lk(detail_identcache::Mtx());
     detail_identcache::Map().clear();
 }
 
-// True only when BOTH files are genuinely Authenticode-trusted, share the same leaf
-// signer CN, AND chain to the same root CA. This is the hardened replacement for the
-// "publisher CN string equality" used by the DLL-hijack and COM-hijack exemptions.
-// Falling back to CN-only equality (when root thumbprints are unavailable) is still
-// gated on both files being trust-verified, so an untrusted spoof never qualifies.
 inline bool SamePublisherTrusted(const std::wstring& a, const std::wstring& b) {
     if (a.empty() || b.empty())
         return false;
@@ -1604,17 +1464,13 @@ inline bool SamePublisherTrusted(const std::wstring& a, const std::wstring& b) {
         return false;
     if (ia.cnUpper.empty() || ia.cnUpper != ib.cnUpper)
         return false;
-    // When both root thumbprints are known they must match; if either is unavailable
-    // we accept the trust-verified CN match (both already passed WinVerifyTrust).
+
+
     if (!ia.rootThumb.empty() && !ib.rootThumb.empty() && ia.rootThumb != ib.rootThumb)
         return false;
     return true;
 }
 
-// Returns the SHA-1 thumbprint (hex, lowercase) of the signer certificate embedded in a PE.
-// Used to pin critical Windows EFI files to exact Microsoft certificate identities,
-// catching cases where an attacker forges the CN string ("Microsoft Windows") while
-// using their own certificate chain.
 inline std::string GetSignerCertThumbprint(const std::wstring& path) {
     HCERTSTORE hStore = nullptr;
     HCRYPTMSG  hMsg   = nullptr;
