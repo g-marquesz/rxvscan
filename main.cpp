@@ -289,14 +289,14 @@ static void LoadReadableFont(ImGuiIO& io) {
 
     static const ImWchar emojiRanges[] = {
         0x1F47E, 0x1F47E,
-        0x1F3AD, 0x1F3AD, // 🎭 LXAScan (DeepScan topic)
-        0x1F489, 0x1F489, // 💉 PLScan (DeepScan topic)
+        0x1F3AD, 0x1F3AD,
+        0x1F489, 0x1F489,
         0x1F4C2, 0x1F4C2,
         0x1F50E, 0x1F50E,
         0x1F6A8, 0x1F6A8,
-        0x1F97E, 0x1F97E, // 🥾 EHKScan (DeepScan topic)
-        0x1F9F5, 0x1F9F5, // 🧵 TRHScan (DeepScan topic)
-        0x1FA9D, 0x1FA9D, // 🪝 HJCScan (DeepScan topic)
+        0x1F97E, 0x1F97E,
+        0x1F9F5, 0x1F9F5,
+        0x1FA9D, 0x1FA9D,
         0
     };
     ImFontConfig emojiConfig = {};
