@@ -386,6 +386,20 @@ static void AddEfiRootIfPresent(const std::wstring& root, std::vector<std::wstri
         roots.push_back(efiRoot);
 }
 
+// Returns the path of fileName inside C:\Windows\Boot\EFI (where bcdboot stages
+// bootmgfw.efi/bootmgr.efi/memtest.efi before copying them to the EFI System
+// Partition), or empty if no such reference file exists. Most ESP candidates
+// (vendor/shim/grub/dual-boot files) simply have no counterpart here, so callers
+// only pay for a hash comparison when a real reference is found.
+static std::wstring FindWindowsBootEfiReference(const std::wstring& fileName) {
+    std::wstring refDir  = JoinPathW(JoinPathW(JoinPathW(GetWindowsDriveRoot(), L"Windows"), L"Boot"), L"EFI");
+    std::wstring refPath = JoinPathW(refDir, fileName);
+    DWORD attrs = GetFileAttributesW(refPath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return L"";
+    return refPath;
+}
+
 static std::vector<std::wstring> CollectEfiRoots(bool& accessIssue) {
     std::vector<std::wstring> roots;
     std::unordered_set<std::wstring> seen;
@@ -807,7 +821,7 @@ static bool IsKnownWindowsBootPath(std::wstring path) {
 
 
 
-bool IsSecureBootEnabled() {
+static void EnableFirmwareEnvPrivilege() {
     HANDLE tok = nullptr;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
         TOKEN_PRIVILEGES tp = {};
@@ -818,6 +832,10 @@ bool IsSecureBootEnabled() {
         }
         CloseHandle(tok);
     }
+}
+
+bool IsSecureBootEnabled() {
+    EnableFirmwareEnvPrivilege();
 
     uint8_t val = 0;
     DWORD rd = GetFirmwareEnvironmentVariableW(
@@ -858,20 +876,9 @@ bool IsIommuEnabled() {
 static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out) {
     const wchar_t* kEfiGuid = L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 
-    // Privilegio SE_SYSTEM_ENVIRONMENT_NAME e habilitado dentro de IsSecureBootEnabled();
-    // habilitamos aqui tambem pois ela so e chamada depois das leituras abaixo.
-    {
-        HANDLE tok = nullptr;
-        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
-            TOKEN_PRIVILEGES tp = {};
-            tp.PrivilegeCount = 1;
-            if (LookupPrivilegeValueW(nullptr, SE_SYSTEM_ENVIRONMENT_NAME, &tp.Privileges[0].Luid)) {
-                tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-                AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
-            }
-            CloseHandle(tok);
-        }
-    }
+    // Privilegio SE_SYSTEM_ENVIRONMENT_NAME e necessario para ler variaveis UEFI;
+    // habilitamos aqui pois IsSecureBootEnabled so e chamada depois das leituras abaixo.
+    EnableFirmwareEnvPrivilege();
 
     uint16_t bootOrder[128] = {};
     DWORD bootOrderBytes = GetFirmwareEnvironmentVariableW(
@@ -1064,6 +1071,334 @@ static void CollectNvramBootEntries(std::vector<ScannerUI::EfiCheatFinding>& out
         f.evidenceState = "CONFIGURATION";
         f.suspicious = false;
         out.push_back(f);
+    }
+}
+
+// ─── Secure Boot key stores: comparacao com as chaves de fabrica da placa-mae ───
+//
+// Bypass comum: manter o Secure Boot LIGADO mas registrar uma PK/KEK/db propria e
+// assinar o bootkit com ela — os checks de "Secure Boot ativo" continuam verdes
+// enquanto o firmware confia em codigo do atacante. O firmware expoe as chaves de
+// fabrica nas variaveis somente-leitura PKDefault/KEKDefault/dbDefault/dbxDefault;
+// qualquer entrada atual fora desses defaults (e fora dos certs que a Microsoft
+// adiciona legitimamente via Windows Update) indica chave alterada.
+
+static const wchar_t* kEfiGlobalGuid   = L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
+static const wchar_t* kEfiImageSecGuid = L"{d719b2cb-3d3a-4596-a3bc-dad00e67656f}";
+
+struct EfiSigEntry {
+    bool        isX509 = false;
+    std::string sha256;   // hex do payload (DER do cert ou hash revogado)
+    std::string cn;       // subject CN quando X.509
+};
+
+static std::string ToUpperAscii(const std::string& s) {
+    std::string up = s;
+    for (auto& c : up)
+        c = (char)toupper((unsigned char)c);
+    return up;
+}
+
+static std::vector<uint8_t> ReadUefiVariable(const wchar_t* name, const wchar_t* guid,
+                                             bool& readable) {
+    readable = false;
+    DWORD cap = 4096;
+    for (;;) {
+        std::vector<uint8_t> buf(cap);
+        DWORD rd = GetFirmwareEnvironmentVariableW(name, guid, buf.data(), cap);
+        if (rd > 0) {
+            readable = true;
+            buf.resize(rd);
+            return buf;
+        }
+        // dbx atualizado pelo Windows Update passa de 100 KB — cresce ate 1 MB
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && cap < (1u << 20)) {
+            cap *= 2;
+            continue;
+        }
+        return {};
+    }
+}
+
+static std::vector<EfiSigEntry> ParseEfiSignatureLists(const std::vector<uint8_t>& buf) {
+    static const GUID kCertX509 =
+        { 0xa5c059a1, 0x94e4, 0x4aa7, { 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72 } };
+
+    std::vector<EfiSigEntry> entries;
+    const size_t total = buf.size();
+    // EFI_SIGNATURE_LIST: GUID(16) + ListSize(4) + HeaderSize(4) + SignatureSize(4)
+    constexpr size_t kListHdr   = 28;
+    constexpr size_t kOwnerGuid = 16; // EFI_SIGNATURE_DATA comeca com o GUID SignatureOwner
+    size_t pos = 0;
+    while (pos + kListHdr <= total) {
+        GUID type = {};
+        uint32_t listSize = 0, headerSize = 0, sigSize = 0;
+        memcpy(&type,       buf.data() + pos,      sizeof(GUID));
+        memcpy(&listSize,   buf.data() + pos + 16, sizeof(uint32_t));
+        memcpy(&headerSize, buf.data() + pos + 20, sizeof(uint32_t));
+        memcpy(&sigSize,    buf.data() + pos + 24, sizeof(uint32_t));
+
+        // Campos de tamanho vem da NVRAM e podem estar corrompidos — nunca ler alem do buffer
+        if (listSize < kListHdr || listSize > total - pos ||
+            headerSize > listSize - kListHdr || sigSize <= kOwnerGuid)
+            break;
+
+        size_t dataPos = pos + kListHdr + headerSize;
+        size_t listEnd = pos + listSize;
+        while (dataPos + sigSize <= listEnd) {
+            const uint8_t* payload = buf.data() + dataPos + kOwnerGuid;
+            size_t payloadLen = sigSize - kOwnerGuid;
+
+            EfiSigEntry e;
+            e.isX509 = IsEqualGUID(type, kCertX509) != FALSE;
+            e.sha256 = DetectionFilter::ComputeBufferSha256(payload, payloadLen);
+            if (e.isX509) {
+                PCCERT_CONTEXT ctx = CertCreateCertificateContext(
+                    X509_ASN_ENCODING, payload, (DWORD)payloadLen);
+                if (ctx) {
+                    wchar_t nb[512] = {};
+                    CertGetNameStringW(ctx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, nb, 512);
+                    e.cn = WideToUtf8(nb);
+                    CertFreeCertificateContext(ctx);
+                }
+            }
+            entries.push_back(std::move(e));
+            dataPos += sigSize;
+        }
+        pos += listSize;
+    }
+    return entries;
+}
+
+static bool IsMicrosoftSecureBootCn(const std::string& cn) {
+    // Certs que o Windows Update adiciona legitimamente ao KEK/db — nao podem alertar
+    // mesmo quando ausentes dos defaults de fabrica (placas antigas nao os incluem).
+    static const char* kMsCns[] = {
+        "MICROSOFT WINDOWS PRODUCTION PCA 2011",
+        "MICROSOFT CORPORATION UEFI CA 2011",
+        "WINDOWS UEFI CA 2023",
+        "MICROSOFT UEFI CA 2023",
+        "MICROSOFT OPTION ROM UEFI CA 2023",
+        "MICROSOFT CORPORATION KEK CA 2011",
+        "MICROSOFT CORPORATION KEK 2K CA 2023",
+        nullptr
+    };
+    std::string up = ToUpperAscii(cn);
+    for (int i = 0; kMsCns[i]; ++i)
+        if (up == kMsCns[i])
+            return true;
+    return false;
+}
+
+static bool IsKnownOemSecureBootCn(const std::string& cn) {
+    // Fabricantes que legitimamente aparecem no db de fabrica (fallback quando a
+    // placa nao expoe dbDefault). Tokens de substring — manter especificos o
+    // suficiente para nao casar com nomes de cert arbitrarios.
+    static const char* kOemTokens[] = {
+        "MICROSOFT", "CANONICAL", "ASUSTEK", "GIGABYTE", "MICRO-STAR", "ASROCK",
+        "DELL", "HEWLETT-PACKARD", "HP INC", "LENOVO", "ACER",
+        "AMERICAN MEGATRENDS", "INSYDE", "PHOENIX TECHNOLOGIES",
+        "TOSHIBA", "SAMSUNG", "FUJITSU", "PANASONIC", "INTEL", "NVIDIA",
+        "RED HAT", "SUSE", "DEBIAN", "FRAMEWORK COMPUTER",
+        nullptr
+    };
+    std::string up = ToUpperAscii(cn);
+    for (int i = 0; kOemTokens[i]; ++i)
+        if (up.find(kOemTokens[i]) != std::string::npos)
+            return true;
+    return false;
+}
+
+static void CollectSecureBootKeyFindings(std::vector<ScannerUI::EfiCheatFinding>& out) {
+    EnableFirmwareEnvPrivilege();
+
+    bool pkOk = false, kekOk = false, dbOk = false, dbxOk = false;
+    bool pkDefOk = false, kekDefOk = false, dbDefOk = false, dbxDefOk = false;
+    auto pkBuf   = ReadUefiVariable(L"PK",         kEfiGlobalGuid,   pkOk);
+    auto kekBuf  = ReadUefiVariable(L"KEK",        kEfiGlobalGuid,   kekOk);
+    auto dbBuf   = ReadUefiVariable(L"db",         kEfiImageSecGuid, dbOk);
+    auto dbxBuf  = ReadUefiVariable(L"dbx",        kEfiImageSecGuid, dbxOk);
+    // Nota (UEFI spec, Globally Defined Variables): TODAS as *Default vivem sob
+    // EFI_GLOBAL_VARIABLE — inclusive dbDefault/dbxDefault, ao contrario de db/dbx.
+    auto pkDef   = ReadUefiVariable(L"PKDefault",  kEfiGlobalGuid, pkDefOk);
+    auto kekDef  = ReadUefiVariable(L"KEKDefault", kEfiGlobalGuid, kekDefOk);
+    auto dbDef   = ReadUefiVariable(L"dbDefault",  kEfiGlobalGuid, dbDefOk);
+    auto dbxDef  = ReadUefiVariable(L"dbxDefault", kEfiGlobalGuid, dbxDefOk);
+
+    // BIOS legada ou NVRAM inacessivel (sem privilegio): nenhum store legivel — sem base
+    if (!pkOk && !kekOk && !dbOk && !dbxOk)
+        return;
+
+    bool secureBoot = IsSecureBootEnabled();
+
+    FILETIME now = {};
+    GetSystemTimeAsFileTime(&now);
+    std::string date, timeStr;
+    FileTimeToLocalStrings(now, date, timeStr);
+
+    auto emit = [&](const char* sev, const char* store, const std::string& reason,
+                    const std::string& detail, const char* ruleId, const char* confidence,
+                    const char* evidenceState, bool suspicious) {
+        ScannerUI::EfiCheatFinding f;
+        f.date = date; f.time = timeStr;
+        f.severity = sev;
+        f.path = std::string("NVRAM::") + store;
+        f.reason = reason;
+        f.detail = detail;
+        f.ruleId = ruleId;
+        f.source = "UEFI NVRAM (Secure Boot keys)";
+        f.confidence = confidence;
+        f.evidenceState = evidenceState;
+        f.suspicious = suspicious;
+        out.push_back(f);
+    };
+
+    auto describeEntries = [](const std::vector<EfiSigEntry>& list) {
+        std::string s;
+        size_t shown = 0;
+        for (const auto& e : list) {
+            if (shown++ == 6) { s += ";..."; break; }
+            if (!s.empty()) s += ";";
+            s += e.cn.empty() ? e.sha256.substr(0, 16) : e.cn;
+        }
+        return s.empty() ? std::string("(vazio)") : s;
+    };
+
+    // Entradas de `cur` ausentes de `def` (por hash SHA-256 do payload)
+    auto entriesNotIn = [](const std::vector<EfiSigEntry>& cur,
+                           const std::vector<EfiSigEntry>& def,
+                           bool skipMicrosoft) {
+        std::unordered_set<std::string> defSet;
+        for (const auto& e : def) defSet.insert(e.sha256);
+        std::vector<EfiSigEntry> extra;
+        for (const auto& e : cur) {
+            if (defSet.count(e.sha256)) continue;
+            if (skipMicrosoft && IsMicrosoftSecureBootCn(e.cn)) continue;
+            extra.push_back(e);
+        }
+        return extra;
+    };
+
+    auto pkCur     = ParseEfiSignatureLists(pkBuf);
+    auto kekCur    = ParseEfiSignatureLists(kekBuf);
+    auto dbCur     = ParseEfiSignatureLists(dbBuf);
+    auto dbxCur    = ParseEfiSignatureLists(dbxBuf);
+    auto pkDefEnt  = ParseEfiSignatureLists(pkDef);
+    auto kekDefEnt = ParseEfiSignatureLists(kekDef);
+    auto dbDefEnt  = ParseEfiSignatureLists(dbDef);
+    auto dbxDefEnt = ParseEfiSignatureLists(dbxDef);
+
+    // ── PK de teste (PKfail): chave "DO NOT TRUST/SHIP" de firmware de referencia AMI
+    //    deixada em producao — a chave privada vazou e assina qualquer coisa
+    for (const auto& e : pkCur) {
+        std::string up = ToUpperAscii(e.cn);
+        if (up.find("DO NOT TRUST") != std::string::npos ||
+            up.find("DO NOT SHIP")  != std::string::npos) {
+            emit("HIGH", "SecureBoot::PK",
+                 "Platform Key is a leaked firmware test key (PKfail)",
+                 "pk_cn=" + e.cn + " | pk_sha256=" + e.sha256.substr(0, 16) +
+                 " | private key is public — anyone can sign Secure Boot payloads",
+                 "BOOT.SECURE_BOOT.TEST_PK", "HIGH", "SUSPICIOUS", true);
+        }
+    }
+
+    // ── PK vs PKDefault: a Platform Key de fabrica da placa-mae
+    if (pkOk && pkDefOk && !pkDefEnt.empty() && !pkCur.empty()) {
+        auto extra   = entriesNotIn(pkCur, pkDefEnt, false);
+        auto missing = entriesNotIn(pkDefEnt, pkCur, false);
+        if (!extra.empty() || !missing.empty()) {
+            emit("HIGH", "SecureBoot::PK",
+                 "Platform Key differs from motherboard factory default",
+                 "pk=" + describeEntries(pkCur) + " | pk_default=" + describeEntries(pkDefEnt) +
+                 " | custom PK allows enrolling attacker KEK/db keys",
+                 "BOOT.SECURE_BOOT.PK_MODIFIED", "HIGH", "SUSPICIOUS", true);
+        }
+    }
+
+    // ── KEK vs KEKDefault
+    if (kekOk && kekDefOk && !kekDefEnt.empty()) {
+        auto extra = entriesNotIn(kekCur, kekDefEnt, /*skipMicrosoft=*/true);
+        if (!extra.empty()) {
+            emit("HIGH", "SecureBoot::KEK",
+                 "KEK contains keys absent from motherboard factory default",
+                 "kek_extra=" + describeEntries(extra) +
+                 " | kek_default=" + describeEntries(kekDefEnt) +
+                 " | rogue KEK can push signing certs into db",
+                 "BOOT.SECURE_BOOT.KEK_MODIFIED", "HIGH", "SUSPICIOUS", true);
+        }
+    }
+
+    // ── db vs dbDefault: cert extra no db assina EFI que passa no Secure Boot
+    if (dbOk && dbDefOk && !dbDefEnt.empty()) {
+        auto extra = entriesNotIn(dbCur, dbDefEnt, /*skipMicrosoft=*/true);
+        if (!extra.empty()) {
+            emit("HIGH", "SecureBoot::db",
+                 "Secure Boot db contains certs absent from motherboard factory default",
+                 "db_extra=" + describeEntries(extra) +
+                 " | a custom db cert signs EFI loaders that pass Secure Boot",
+                 "BOOT.SECURE_BOOT.DB_CUSTOM_CERT", "HIGH", "SUSPICIOUS", true);
+        }
+    } else if (dbOk && !dbDefOk) {
+        // Fallback: placa nao expoe dbDefault — sem diff possivel, checa apenas CNs
+        // desconhecidos (OEMs incluem certs extras de fabrica, dai confianca baixa)
+        std::vector<EfiSigEntry> unknown;
+        for (const auto& e : dbCur) {
+            if (!e.isX509) continue;
+            if (e.cn.empty() || IsMicrosoftSecureBootCn(e.cn) || IsKnownOemSecureBootCn(e.cn))
+                continue;
+            unknown.push_back(e);
+        }
+        if (!unknown.empty()) {
+            emit("MEDIUM", "SecureBoot::db",
+                 "Secure Boot db contains unrecognized signing certs",
+                 "db_unknown=" + describeEntries(unknown) +
+                 " | factory defaults (dbDefault) not exposed by firmware — manual review",
+                 "BOOT.SECURE_BOOT.DB_UNKNOWN_CERT", "LOW", "REVIEW", false);
+        }
+    }
+
+    // ── dbx vs dbxDefault: rollback da lista de revogacao reabilita loaders
+    //    vulneraveis ja revogados (tecnica BlackLotus)
+    if (dbxDefOk && !dbxDefEnt.empty()) {
+        auto missing = dbxOk ? entriesNotIn(dbxDefEnt, dbxCur, false) : dbxDefEnt;
+        if (!missing.empty()) {
+            char cnt[64] = {};
+            snprintf(cnt, sizeof(cnt), "revoked_entries_removed=%zu/%zu",
+                     missing.size(), dbxDefEnt.size());
+            emit("MEDIUM", "SecureBoot::dbx",
+                 "Secure Boot revocation list (dbx) rolled back below factory default",
+                 std::string(cnt) + " | removed=" + describeEntries(missing) +
+                 " | rollback re-enables revoked vulnerable bootloaders",
+                 "BOOT.SECURE_BOOT.DBX_ROLLBACK", "MEDIUM", "SUSPICIOUS", true);
+        }
+    }
+
+    // ── SetupMode/AuditMode: chaves podem ser trocadas sem autenticacao
+    {
+        uint8_t setupMode = 0, auditMode = 0;
+        bool smOk = false, amOk = false;
+        auto sm = ReadUefiVariable(L"SetupMode", kEfiGlobalGuid, smOk);
+        if (smOk && !sm.empty()) setupMode = sm[0];
+        auto am = ReadUefiVariable(L"AuditMode", kEfiGlobalGuid, amOk);
+        if (amOk && !am.empty()) auditMode = am[0];
+
+        if (secureBoot && (setupMode == 1 || auditMode == 1)) {
+            emit("HIGH", "SecureBoot::SetupMode",
+                 "firmware in Setup/Audit mode with Secure Boot reported active",
+                 std::string("setup_mode=") + (setupMode == 1 ? "1" : "0") +
+                 " | audit_mode=" + (auditMode == 1 ? "1" : "0") +
+                 " | keys can be replaced without authentication",
+                 "BOOT.SECURE_BOOT.SETUP_MODE", "HIGH", "SUSPICIOUS", true);
+        }
+    }
+
+    // ── PK ausente com Secure Boot supostamente ativo: estado inconsistente
+    if (secureBoot && (!pkOk || pkCur.empty())) {
+        emit("MEDIUM", "SecureBoot::PK",
+             "Secure Boot reported active but no Platform Key enrolled",
+             std::string("pk_present=") + (pkOk ? "yes(empty)" : "no") +
+             " | without a PK the key hierarchy is not anchored",
+             "BOOT.SECURE_BOOT.PK_MISSING", "MEDIUM", "REVIEW", false);
     }
 }
 
@@ -1430,6 +1765,30 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
             }
         }
 
+        // Cross-location integrity: compare this file's hash against the reference
+        // copy Windows itself keeps in C:\Windows\Boot\EFI (staged there by bcdboot
+        // before being written to the ESP). Unlike the baseline check above (which
+        // only notices a change between two scans), this catches tampering that was
+        // already present the very first time the tool ever runs on the machine.
+        bool bootRefMismatch = false;
+        std::wstring bootRefPath;
+        std::string bootRefHash, bootEspHash;
+        {
+            std::wstring refPath = FindWindowsBootEfiReference(fileName);
+            if (!refPath.empty()) {
+                std::string espHash = currentHash.empty()
+                    ? DetectionFilter::ComputeFileSha256(candidate.path)
+                    : currentHash;
+                std::string refHash = DetectionFilter::ComputeFileSha256(refPath);
+                if (!espHash.empty() && !refHash.empty() && espHash != refHash) {
+                    bootRefMismatch = true;
+                    bootRefPath = refPath;
+                    bootEspHash = espHash;
+                    bootRefHash = refHash;
+                }
+            }
+        }
+
         std::string suspiciousStr;
         if (!signedOk)
             suspiciousStr = DetectionFilter::FindSuspiciousStringInEfi(candidate.path);
@@ -1495,9 +1854,26 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
                            (peInfo.injectedSection && !signedOk);
         bool allClear = signedOk && !badSections && !badSubsystem && !checksumMismatchSevere &&
                         !catalogMismatch && !hashChanged && !thumbprintMismatch &&
-                        !hookAnomaly;
+                        !hookAnomaly && !bootRefMismatch;
         if (allClear)
             continue;
+
+        if (bootRefMismatch) {
+            ScannerUI::EfiCheatFinding f;
+            FileTimeToLocalStrings(candidate.data.ftLastWriteTime, f.date, f.time);
+            f.severity = "HIGH";
+            f.path = WideToUtf8(candidate.path);
+            f.reason = "EFI da particao de boot diverge da copia de referencia em C:\\Windows\\Boot\\EFI";
+            f.detail = "esp_sha256=" + bootEspHash + " | reference_sha256=" + bootRefHash +
+                       " | reference_path=" + WideToUtf8(bootRefPath);
+            f.ruleId = "BOOT.EFI.ESP_C_MISMATCH";
+            f.source = "ESP vs C:\\Windows\\Boot\\EFI";
+            f.confidence = "HIGH";
+            f.evidenceState = "SUSPICIOUS";
+            f.suspicious = true;
+            findings.push_back(std::move(f));
+            continue;
+        }
 
         if (checksumMismatchSevere) {
             ScannerUI::EfiCheatFinding f;
@@ -1630,6 +2006,7 @@ std::vector<ScannerUI::EfiCheatFinding> CollectEfiCheatFindings(std::string& sta
     CollectBootIntegrityFindings(findings);
     CollectBcdIntegrityFindings(roots, findings);
     CollectNvramBootEntries(findings);
+    CollectSecureBootKeyFindings(findings);
     std::string storageCoverage;
     auto storageFindings = CollectBootStorageIntegrityFindings(storageCoverage);
     findings.insert(findings.end(),

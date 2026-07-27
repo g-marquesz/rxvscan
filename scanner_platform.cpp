@@ -698,6 +698,31 @@ static std::string CollectOsVersion() {
     return WideToUtf8(product + version.str());
 }
 
+// Placa-mae Intel X99 (BaseBoardProduct/SystemProductName) — mesmo par de
+// campos e mesma logica de substring ja usada em scanner_events_services.cpp
+// para explicar a ausencia de TPM 2.0 nativo nessa plataforma.
+static bool DetectBoardX99(std::string& boardProduct) {
+    const wchar_t* key = L"HARDWARE\\DESCRIPTION\\System\\BIOS";
+    const wchar_t* fields[] = { L"BaseBoardProduct", L"SystemProductName", nullptr };
+    for (int i = 0; fields[i]; ++i) {
+        std::wstring value = ReadRegString(HKEY_LOCAL_MACHINE, key, fields[i]);
+        if (value.empty()) continue;
+        if (boardProduct.empty()) boardProduct = WideToUtf8(value);
+        if (ToUpperInvariant(value).find(L"X99") != std::wstring::npos)
+            return true;
+    }
+    return false;
+}
+
+// CPU Xeon (ProcessorNameString do primeiro core logico).
+static bool DetectCpuXeon(std::string& cpuName) {
+    const wchar_t* key = L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
+    std::wstring value = ReadRegString(HKEY_LOCAL_MACHINE, key, L"ProcessorNameString");
+    if (value.empty()) return false;
+    cpuName = WideToUtf8(value);
+    return ToUpperInvariant(value).find(L"XEON") != std::wstring::npos;
+}
+
 void CollectSystemOverview(ScannerUI::ScanData& data) {
     std::string bootDate, bootTime;
     FileTimeToLocalStrings(GetBootFileTime(), bootDate, bootTime);
@@ -710,6 +735,8 @@ void CollectSystemOverview(ScannerUI::ScanData& data) {
     data.device = CollectDeviceName();
     data.pagefile = CollectPageFiles();
     data.sysType = CollectSystemType();
+    data.boardIsX99 = DetectBoardX99(data.boardProduct);
+    data.cpuIsXeon  = DetectCpuXeon(data.cpuName);
 }
 
 std::wstring DevicePathToDosPath(const std::wstring& path) {

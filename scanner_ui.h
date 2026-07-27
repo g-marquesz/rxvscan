@@ -17,6 +17,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 namespace ScannerUI {
 
@@ -83,6 +84,14 @@ struct GenericBypassFinding {
 
 struct StreamModFinding {
     std::string type;      // CAPTURE_EXCLUDE, OBS_PLUGIN, VIRTUAL_DISPLAY, DWM_INJECT, DWM_HOOK, OVERLAY
+    std::string process;
+    std::string target;
+    std::string detail;
+    std::string severity;  // HIGH / MEDIUM / FLAG
+};
+
+struct DeepScanFinding {
+    std::string type;
     std::string process;
     std::string target;
     std::string detail;
@@ -276,6 +285,10 @@ struct ScanData {
 
     std::string boot, explorer, biosVersion, biosMode, osVersion;
     std::string device, pagefile, sysType;
+    bool boardIsX99 = false;   // placa-mae Intel X99 detectada (BaseBoardProduct/SystemProductName)
+    bool cpuIsXeon  = false;   // CPU Xeon detectada (ProcessorNameString)
+    std::string boardProduct; // string crua do board, para tooltip
+    std::string cpuName;      // string crua do CPU, para tooltip
     float inspectZoom = 1.20f;
 
 
@@ -338,6 +351,9 @@ struct ScanData {
     std::string remotePortStatus = "Waiting";
     std::vector<RemotePortFinding> remotePortFindings;
 
+    std::string deepScanStatus = "Waiting";
+    std::vector<DeepScanFinding> deepScanFindings;
+
 
     int activePage = 1;
     std::string efiCheatStatus = "Waiting";
@@ -383,6 +399,10 @@ struct ScanData {
     int  bypassTypeFilter  = 0;
 
 
+    char deepScanFilter[128] = {};
+    int  deepScanSevFilter   = 0; // 0=ALL, 1=HIGH, 2=MEDIUM
+
+
     char memFilter[128]   = {};
     int  memSevFilter     = 0;
     int  memTypeFilter    = 0;
@@ -408,6 +428,7 @@ struct ScanData {
     void* winScanIconTexture = nullptr;
     void* kernelScanIconTexture = nullptr;
     void* sysmonIconTexture = nullptr;
+    void* deepScanIconTexture = nullptr;
 
     int   cpu = 62, ram = 71, gpu = 45;
     std::string speedScan = "normal";
@@ -533,6 +554,46 @@ inline std::string FileNameFromPath(const std::string& path) {
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 
+inline std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty())
+        return {};
+    int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                    value.c_str(), -1, nullptr, 0);
+    if (chars <= 1)
+        return {};
+    std::wstring wide(static_cast<size_t>(chars), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        value.c_str(), -1, wide.data(), chars);
+    wide.pop_back();
+    return wide;
+}
+
+inline bool OpenFileLocation(const std::string& path) {
+    std::wstring widePath = Utf8ToWide(path);
+    if (widePath.empty() || widePath.find(L'"') != std::wstring::npos)
+        return false;
+
+    wchar_t windowsDir[MAX_PATH] = {};
+    if (!GetWindowsDirectoryW(windowsDir, MAX_PATH))
+        return false;
+
+    std::wstring explorer = std::wstring(windowsDir) + L"\\explorer.exe";
+    std::wstring command = L"explorer.exe /select,\"" + widePath + L"\"";
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+
+    STARTUPINFOW startup = {};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process = {};
+    BOOL opened = CreateProcessW(explorer.c_str(), mutableCommand.data(), nullptr, nullptr,
+                                 FALSE, 0, nullptr, nullptr, &startup, &process);
+    if (!opened)
+        return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
 // Formats "ExeName.exe [1234]" → "ExeName.exe 1234"
 // Used to build headline text: "MAPPER in Discord.exe 1234  0x00ABCDEF"
 inline std::string FindingHeadline(const std::string& type,
@@ -623,6 +684,30 @@ inline void ProcessLink(const char* label, const std::string& path, const char* 
         }
         ImGui::PopID();
     }
+}
+
+inline void FileSelectionLink(const std::string& path, const char* id) {
+    std::string file = FileNameFromPath(path);
+    if (file.empty())
+        file = "-";
+
+    ImGui::PushID(id);
+    ImGui::TextColored(col::Header, "%s", file.c_str());
+    if (!path.empty() && path != "-") {
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("Abrir local do arquivo\n%s", path.c_str());
+            ImVec2 min = ImGui::GetItemRectMin();
+            ImVec2 max = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddLine(
+                ImVec2(min.x, max.y), ImVec2(max.x, max.y),
+                ImGui::GetColorU32(col::Header), 1.0f);
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+            OpenFileLocation(path);
+    }
+    ImGui::PopID();
 }
 
 inline void BeginPanel(const char* id, const char* title, float height = 0.0f) {
@@ -1804,6 +1889,21 @@ inline void DrawSidebar(ScanData& d, float height) {
     ImGui::SameLine(72.0f);
     ImGui::TextColored(d.emulatorOpenedAt == "-" ? col::TextDim : col::Header,
                        "%s", emuClock.c_str());
+
+    // So aparece quando detectado - nao polui a sidebar em maquinas normais.
+    if (d.boardIsX99 || d.cpuIsXeon) {
+        sectionTitle("Hardware");
+        if (d.boardIsX99) {
+            ImGui::TextColored(col::Yellow, "X99 detectada");
+            if (ImGui::IsItemHovered() && !d.boardProduct.empty())
+                ImGui::SetTooltip("%s", d.boardProduct.c_str());
+        }
+        if (d.cpuIsXeon) {
+            ImGui::TextColored(col::Yellow, "Xeon detectado");
+            if (ImGui::IsItemHovered() && !d.cpuName.empty())
+                ImGui::SetTooltip("%s", d.cpuName.c_str());
+        }
+    }
 
     const float statusY = ImGui::GetWindowHeight() - 58.0f;
     if (ImGui::GetCursorPosY() < statusY)
@@ -3911,16 +4011,36 @@ inline void DrawSystemMemory(ScanData& d) {
 
 inline void DrawGenericBypass(ScanData& d) {
     const float cardH      = 100.0f;
-    const float totalCards = (float)(d.genericBypass.size() + d.streamModFindings.size() + d.remotePortFindings.size());
-    const float panelH     = 126.0f + totalCards * (cardH + 8.0f);
+    size_t compactCards = 0;
+    for (const auto& finding : d.genericBypass) {
+        if (finding.type == "CLSID_DEVIATION" || finding.type == "CLSID_HIDDEN" ||
+            finding.type == "CLSID_DELETED")
+            ++compactCards;
+    }
+    const size_t totalCards = d.genericBypass.size() + d.streamModFindings.size() +
+                              d.remotePortFindings.size();
+    const size_t regularCards = totalCards - compactCards;
+    const float panelH = 126.0f + (float)regularCards * (cardH + 8.0f) +
+                         (float)compactCards * 54.0f;
     detail::BeginPanel("##generic-bypass", "Generic Bypass", panelH);
 
     const size_t totalFindings = d.genericBypass.size() + d.streamModFindings.size() + d.remotePortFindings.size();
     bool loading = (d.genericBypassStatus == "Loading" || d.genericBypassStatus == "Waiting" ||
                     d.streamModStatus     == "Loading" || d.streamModStatus     == "Waiting" ||
                     d.remotePortStatus    == "Loading" || d.remotePortStatus    == "Waiting");
-    ImVec4 statusColor = loading ? col::TextDim : (totalFindings == 0 ? col::Green : col::Red);
-    const char* statusText = loading ? "Loading" : (totalFindings == 0 ? "OK" : "DETECTED");
+    auto isActionable = [](const std::string& severity) {
+        return severity == "MEDIUM" || severity == "HIGH" || severity == "CRITICAL";
+    };
+    bool actionableFinding = false;
+    for (const auto& f : d.genericBypass) actionableFinding |= isActionable(f.severity);
+    for (const auto& f : d.streamModFindings) actionableFinding |= isActionable(f.severity);
+    for (const auto& f : d.remotePortFindings) actionableFinding |= isActionable(f.severity);
+    ImVec4 statusColor = loading ? col::TextDim :
+                          totalFindings == 0 ? col::Green :
+                          actionableFinding ? col::Red : col::Yellow;
+    const char* statusText = loading ? "Loading" :
+                             totalFindings == 0 ? "OK" :
+                             actionableFinding ? "DETECTED" : "REVIEW";
 
     if (ImGui::BeginTable("##generic-bypass-summary", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoHostExtendX)) {
         ImGui::TableSetupColumn("status",   ImGuiTableColumnFlags_WidthStretch, 0.24f);
@@ -3949,33 +4069,56 @@ inline void DrawGenericBypass(ScanData& d) {
     detail::FilterBar("##bypass-s", d.bypassFilter, sizeof(d.bypassFilter),
                       "##bypass-type", &d.bypassTypeFilter,
                       "ALL\0HANDLE\0AV_EXCLUSION\0AV_REMOVAL\0SYSMON\0EVENTLOG\0REMOTETHREAD\0PROC_ACCESS\0CHEAT_DOMAIN\0EXPLORER\0"
+                      "CLSID_DEVIATION\0CLSID_HIDDEN\0CLSID_DELETED\0"
                       "CAPTURE_EXCLUDE\0OBS_PLUGIN\0OBS_INJECT\0VIRTUAL_DISPLAY\0DWM_INJECT\0DWM_HOOK\0"
-                      "OVERLAY\0NVFBC_ALLOW\0VIRTUAL_CAMERA\0REMOTE_PORT\0", 20,
+                      "OVERLAY\0NVFBC_ALLOW\0VIRTUAL_CAMERA\0REMOTE_PORT\0", 23,
                       "Limpar##bypass", "Buscar por process, target ou detail");
     ImGui::Spacing();
 
     static const char* kBypassTypes[] = {
         "",
         "HANDLE", "AV_EXCLUSION", "AV_REMOVAL", "SYSMON", "EVENTLOG", "REMOTETHREAD", "PROC_ACCESS", "CHEAT_DOMAIN", "EXPLORER",
+        "CLSID_DEVIATION", "CLSID_HIDDEN", "CLSID_DELETED",
         "CAPTURE_EXCLUDE", "OBS_PLUGIN", "OBS_INJECT", "VIRTUAL_DISPLAY", "DWM_INJECT", "DWM_HOOK",
         "OVERLAY", "NVFBC_ALLOW", "VIRTUAL_CAMERA", "REMOTE_PORT"
     };
     // indices 1-9   → generic bypass only
     // indices 10-18 → stream mod only
     // index   19    → remote port only
-    const bool showBypass     = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 1 && d.bypassTypeFilter <= 9);
-    const bool showStreamMod  = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 10 && d.bypassTypeFilter <= 18);
-    const bool showRemotePort = d.bypassTypeFilter == 0 || d.bypassTypeFilter == 19;
+    const bool showBypass     = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 1 && d.bypassTypeFilter <= 12);
+    const bool showStreamMod  = d.bypassTypeFilter == 0 || (d.bypassTypeFilter >= 13 && d.bypassTypeFilter <= 21);
+    const bool showRemotePort = d.bypassTypeFilter == 0 || d.bypassTypeFilter == 22;
 
     const std::string needle = detail::FLow(std::string(d.bypassFilter));
 
     if (showBypass) {
         for (size_t i = 0; i < d.genericBypass.size(); ++i) {
             const auto& f = d.genericBypass[i];
-            if (d.bypassTypeFilter >= 1 && d.bypassTypeFilter <= 9 &&
+            if (d.bypassTypeFilter >= 1 && d.bypassTypeFilter <= 12 &&
                 f.type != kBypassTypes[d.bypassTypeFilter]) continue;
             if (!detail::FMatch(needle, { f.type, f.process, f.target, f.detail })) continue;
             ImVec4 cardColor = (f.severity == "HIGH" || f.severity == "CRITICAL") ? col::Red : col::Yellow;
+
+            const bool clsidFinding = f.type == "CLSID_DEVIATION" ||
+                                      f.type == "CLSID_HIDDEN" ||
+                                      f.type == "CLSID_DELETED";
+            if (clsidFinding) {
+                detail::BeginResultCard(("##gb-card" + std::to_string(i)).c_str(), 46.0f, cardColor);
+                if (f.type == "CLSID_DEVIATION" && !f.process.empty() && f.process != "-") {
+                    ImGui::TextColored(cardColor, "Hijacking detectado em :");
+                    ImGui::SameLine();
+                    detail::FileSelectionLink(f.process, ("gb-clsid-file" + std::to_string(i)).c_str());
+                } else {
+                    ImGui::TextColored(cardColor, "%s :",
+                        f.type == "CLSID_HIDDEN" ? "CLSID oculto detectado" : "CLSID excluido detectado");
+                    ImGui::SameLine();
+                    detail::CopyableValue(f.target, cardColor);
+                }
+                detail::EndResultCard();
+                ImGui::Spacing();
+                continue;
+            }
+
             detail::BeginResultCard(("##gb-card" + std::to_string(i)).c_str(), cardH, cardColor);
             if (ImGui::BeginTable(("##gb-grid" + std::to_string(i)).c_str(), 4,
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoHostExtendX)) {
@@ -4014,7 +4157,7 @@ inline void DrawGenericBypass(ScanData& d) {
     if (showStreamMod) {
         for (size_t i = 0; i < d.streamModFindings.size(); ++i) {
             const auto& f = d.streamModFindings[i];
-            if (d.bypassTypeFilter >= 10 && d.bypassTypeFilter <= 18 &&
+            if (d.bypassTypeFilter >= 13 && d.bypassTypeFilter <= 21 &&
                 f.type != kBypassTypes[d.bypassTypeFilter]) continue;
             if (!detail::FMatch(needle, { f.type, f.process, f.target, f.detail })) continue;
             ImVec4 cc = (f.severity == "HIGH")  ? col::Red   :
@@ -4098,6 +4241,130 @@ inline void DrawGenericBypass(ScanData& d) {
             ImGui::Spacing();
         }
     }
+
+    detail::EndPanel();
+}
+
+inline void DrawDeepScan(ScanData& d) {
+    const float cardH  = 100.0f;
+    const float panelH = 190.0f + (float)d.deepScanFindings.size() * (cardH + 8.0f);
+    detail::BeginPanel("##deep-scan", "\xF0\x9F\x94\x8E DeepScan", panelH); // 🔍 DeepScan
+
+    const size_t totalFindings = d.deepScanFindings.size();
+    bool loading = (d.deepScanStatus == "Loading");
+    bool waiting = (d.deepScanStatus == "Waiting");
+    ImVec4 statusColor = (loading || waiting) ? col::TextDim : (totalFindings == 0 ? col::Green : col::Red);
+    const char* statusText = loading ? "Loading" : waiting ? "Waiting" : (totalFindings == 0 ? "OK" : "DETECTED");
+
+    if (ImGui::BeginTable("##deep-scan-summary", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoHostExtendX)) {
+        ImGui::TableSetupColumn("status",   ImGuiTableColumnFlags_WidthStretch, 0.24f);
+        ImGui::TableSetupColumn("scan",     ImGuiTableColumnFlags_WidthStretch, 0.52f);
+        ImGui::TableSetupColumn("findings", ImGuiTableColumnFlags_WidthStretch, 0.24f);
+        ImGui::TableNextRow();
+
+        ImGui::TableNextColumn();
+        ImGui::TextColored(col::TextDim, "STATUS");
+        detail::StatusBadge(statusText, statusColor);
+
+        ImGui::TableNextColumn();
+        ImGui::TextColored(col::TextDim, "SCAN");
+        ImGui::TextColored(statusColor,
+            loading             ? "Running deep scan..." :
+            waiting             ? "Waiting for scan (click Scan below)" :
+            totalFindings == 0  ? "No deep scan indicators detected" :
+            "Review deep scan indicators");
+
+        ImGui::TableNextColumn();
+        ImGui::TextColored(col::TextDim, "FINDINGS");
+        detail::StatusBadge(std::to_string((int)totalFindings).c_str(), statusColor);
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    if (detail::ScanPageButton("##deepscan-run", d.deepScanStatus == "Loading"))
+        d.pendingCommand = "run!pg4";
+    ImGui::Spacing();
+    detail::FilterBar("##deepscan-s", d.deepScanFilter, sizeof(d.deepScanFilter),
+                      "##deepscan-sev", &d.deepScanSevFilter,
+                      "ALL\0HIGH\0MEDIUM\0", 3,
+                      "Limpar##deepscan", "Buscar por process, target ou detail");
+    ImGui::Spacing();
+
+    const std::string needle = detail::FLow(std::string(d.deepScanFilter));
+
+    // Agrupa os indices ja filtrados (busca + severidade) por topico, para que
+    // cada topico do DeepScan (PLScan, HJCScan, ...) seja renderizado como uma
+    // secao separada em vez de uma lista unica misturada.
+    std::vector<size_t> plscanIdx, hjcscanIdx, ehkscanIdx, lxascanIdx, trhscanIdx, krtscanIdx, otherIdx;
+    for (size_t i = 0; i < d.deepScanFindings.size(); ++i) {
+        const auto& f = d.deepScanFindings[i];
+        if (d.deepScanSevFilter == 1 && f.severity != "HIGH")   continue;
+        if (d.deepScanSevFilter == 2 && f.severity != "MEDIUM") continue;
+        if (!detail::FMatch(needle, { f.type, f.process, f.target, f.detail })) continue;
+        if (f.type == "PLSCAN")       plscanIdx.push_back(i);
+        else if (f.type == "HJCSCAN") hjcscanIdx.push_back(i);
+        else if (f.type == "EHKSCAN") ehkscanIdx.push_back(i);
+        else if (f.type == "LXASCAN") lxascanIdx.push_back(i);
+        else if (f.type == "TRHSCAN") trhscanIdx.push_back(i);
+        else if (f.type == "KRTSCAN") krtscanIdx.push_back(i);
+        else                          otherIdx.push_back(i);
+    }
+
+    auto drawCard = [&](size_t i) {
+        const auto& f = d.deepScanFindings[i];
+        ImVec4 cc = (f.severity == "HIGH")  ? col::Red   :
+                    (f.severity == "MEDIUM") ? col::Yellow : col::TextDim;
+        detail::BeginResultCard(("##ds-card" + std::to_string(i)).c_str(), cardH, cc);
+        if (ImGui::BeginTable(("##ds-grid" + std::to_string(i)).c_str(), 4,
+                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoHostExtendX)) {
+            ImGui::TableSetupColumn("type",    ImGuiTableColumnFlags_WidthStretch, 0.14f);
+            ImGui::TableSetupColumn("summary", ImGuiTableColumnFlags_WidthStretch, 0.50f);
+            ImGui::TableSetupColumn("process", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+            ImGui::TableSetupColumn("level",   ImGuiTableColumnFlags_WidthStretch, 0.10f);
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(col::TextDim, "TYPE");
+            ImGui::TextColored(col::Header, "%s", f.type.c_str());
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(col::TextDim, "SUMMARY");
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+            ImGui::TextColored(col::Header, "%s", f.detail.c_str());
+            ImGui::PopTextWrapPos();
+
+            ImGui::TableNextColumn();
+            detail::ProcessLink("PROCESS", f.process, ("ds-process" + std::to_string(i)).c_str());
+            if (!f.target.empty() && f.target != "-")
+                detail::ProcessLink("TARGET", f.target, ("ds-target" + std::to_string(i)).c_str());
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(col::TextDim, "LEVEL");
+            detail::StatusBadge(f.severity.c_str(), cc);
+            ImGui::EndTable();
+        }
+        detail::EndResultCard();
+        ImGui::Spacing();
+    };
+
+    auto drawTopic = [&](const char* emojiLabel, const std::vector<size_t>& idx) {
+        if (idx.empty()) return;
+        ImGui::Spacing();
+        ImGui::TextColored(col::Header, "%s", emojiLabel);
+        ImGui::SameLine();
+        ImGui::TextColored(col::TextDim, "(%d)", (int)idx.size());
+        ImGui::Separator();
+        ImGui::Spacing();
+        for (size_t i : idx) drawCard(i);
+    };
+
+    drawTopic("\xF0\x9F\x92\x89 PLScan", plscanIdx);    // 💉 PLScan
+    drawTopic("\xF0\x9F\xAA\x9D HJCScan", hjcscanIdx);  // 🪝 HJCScan
+    drawTopic("\xF0\x9F\xA5\xBE EHKScan", ehkscanIdx);  // 🥾 EHKScan
+    drawTopic("\xF0\x9F\x8E\xAD LXAScan", lxascanIdx);  // 🎭 LXAScan
+    drawTopic("\xF0\x9F\xA7\xB5 TRHScan", trhscanIdx);  // 🧵 TRHScan
+    drawTopic("KRTScan", krtscanIdx);
+    drawTopic("Outros", otherIdx);
 
     detail::EndPanel();
 }
@@ -4896,7 +5163,7 @@ inline bool RenderLoadingOverlay(ScanData& d, float elapsedSeconds) {
 }
 
 // Janela final do scanner: apenas uma barra de progresso com o estagio atual.
-// Os resultados completos sao enviados em tempo real para o site (aba ResultScan).
+// Os resultados completos permanecem disponíveis somente na interface do scanner.
 inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     col::SetAccentColor(d.accentColor);
 
@@ -5009,10 +5276,10 @@ inline void RenderScanProgressOverlay(ScanData& d, void(*onClose)() = nullptr) {
     dl->AddText(ImVec2(winMin.x + 28.0f, winMin.y + 352.0f),
                 detail::ColorAlpha(detail::LoadMuted, 0.78f),
                 finished
-                    ? "Resultados completos disponiveis em rxvteam.com (aba ResultScan)"
+                    ? "Resultados completos disponiveis no scanner."
                     : failed
-                        ? "Os resultados parciais ja foram enviados para rxvteam.com (aba ResultScan)"
-                        : "Os resultados sao enviados em tempo real para rxvteam.com (aba ResultScan)");
+                        ? "Resultados parciais disponiveis no scanner."
+                        : "Os resultados aparecem somente no scanner.");
     dl->AddText(ImVec2(winMin.x + 28.0f, winMin.y + 374.0f),
                 detail::ColorAlpha(detail::LoadMuted, 0.50f),
                 "Nao feche esta janela durante a varredura.");
@@ -5282,34 +5549,35 @@ inline bool SubNavigationItem(const char* id, const char* label, int count,
 }
 
 inline void DrawMainScannerSections(ScanData& d) {
-    const int archiveCount = (int)d.bam.size();
+    const int archiveCount = (int)(d.bam.size() + d.prefetch.size() + d.usnAnomalies.size());
     const int emuCount = (int)d.emulatorFindings.size();
     const int winCount = (int)(d.systemMemoryFindings.size() + d.kernelAnomalies.size());
     const int bypassCount = (int)(d.genericBypass.size() + d.streamModFindings.size() +
                                   d.remotePortFindings.size());
     const float sectionWidth = ImGui::GetContentRegionAvail().x;
 
-    MainNavigationItem("archives", "Archives \xF0\x9F\x93\x82", "Arquivos detectados", archiveCount,
-                       true, archiveCount ? col::Yellow : col::Green, sectionWidth);
+    MainNavigationItem("execution-artifacts", "Trace", "BAM, Prefetch, USN",
+                       archiveCount, true, archiveCount ? col::Yellow : col::Green, sectionWidth);
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     DrawBam(d);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    DrawPrefetch(d);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    DrawUsn(d);
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
 
-    MainNavigationItem("emu", "Emu Checker", "Deteccoes do emulador", emuCount,
-                       true, detail::StatusColor(d.emulatorStatus, emuCount),
+    MainNavigationItem("runtime-memory", "Inject", "HD-Player e memoria",
+                       emuCount + winCount, true,
+                       detail::StatusColor(d.emulatorStatus == "DETECTED" ? d.emulatorStatus : d.systemMemoryStatus,
+                                           emuCount + winCount),
                        sectionWidth, d.emuIconTexture, true);
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     DrawEmulator(d);
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-
-    MainNavigationItem("winscan", "WinScan", "Deteccoes de memoria e kernel", winCount,
-                       true, detail::StatusColor(d.systemMemoryStatus, winCount),
-                       sectionWidth, d.winScanIconTexture);
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
     DrawSystemMemory(d);
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
 
-    MainNavigationItem("bypass", "Generic Bypass \xF0\x9F\x9A\xA8", "Deteccoes de hooks e acessos",
+    MainNavigationItem("bypass", "Evasion", "Hooks, streams, handles, portas",
                        bypassCount, true,
                        detail::StatusColor(d.genericBypassStatus, bypassCount),
                        sectionWidth);
@@ -5392,6 +5660,10 @@ inline void DrawShortcutBar(ScanData& d) {
     if (ShortcutButton("kernel-scan", "Kernel Scan", d.kernelScanIconTexture,
                        d.activePage == 3, ImVec2(198.0f, 52.0f)))
         d.activePage = 3;
+    ImGui::SameLine(0.0f, 6.0f);
+    if (ShortcutButton("deepscan", "DeepScan", d.deepScanIconTexture,
+                       d.activePage == 4, ImVec2(198.0f, 52.0f)))
+        d.activePage = 4;
 
     ImGui::EndChild();
     ImGui::PopStyleVar(3);
@@ -5453,6 +5725,8 @@ inline void Render(ScanData& d, void(*onMinimize)() = nullptr, void(*onClose)() 
         DrawKernelAnomalies(d);
     } else if (d.activePage == 9) {
         DrawSysmonInspector(d);
+    } else if (d.activePage == 4) {
+        DrawDeepScan(d);
     } else {
         DrawMainScannerSections(d);
     }

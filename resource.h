@@ -6,3 +6,7 @@
 #define IDR_PNG_KERNEL_SCAN  204
 #define IDR_PNG_GENERAL      205
 #define IDR_PNG_SYSMON       206
+#define IDR_PNG_DEEP_SCAN    207
+
+#define IDR_DRIVER_XVSCREEN  301
+#define IDR_DRIVER_RTCORE64  302

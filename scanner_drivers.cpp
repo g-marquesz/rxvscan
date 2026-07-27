@@ -199,6 +199,94 @@ static std::string HexValue(ULONGLONG value) {
     return oss.str();
 }
 
+struct DriverLifecycleEvidence {
+    bool stopRequested = false;
+    bool stopped = false;
+    bool startChanged = false;
+    bool loadFailed = false;
+    bool installed = false;
+    FILETIME newest = {};
+    std::string detail;
+};
+
+static void AppendLifecycleDetail(DriverLifecycleEvidence& evidence,
+                                  const std::string& item, const FILETIME& eventTime) {
+    if (!evidence.detail.empty() && evidence.detail.find(item) == std::string::npos)
+        evidence.detail += "; ";
+    if (evidence.detail.find(item) == std::string::npos)
+        evidence.detail += item;
+    if (FileTimeToU64(eventTime) > FileTimeToU64(evidence.newest))
+        evidence.newest = eventTime;
+}
+
+static std::unordered_map<std::wstring, DriverLifecycleEvidence>
+CollectDriverLifecycleEvidence() {
+    std::unordered_map<std::wstring, DriverLifecycleEvidence> evidence;
+    EVT_HANDLE query = EvtQuery(
+        nullptr, L"System",
+        L"*[System[(EventID=219 or EventID=7000 or EventID=7026 or EventID=7035 or EventID=7036 or EventID=7040 or EventID=7045)]]",
+        EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!query)
+        return evidence;
+
+    const ULONGLONG boot = FileTimeToU64(GetBootFileTime());
+    EVT_HANDLE events[16] = {};
+    DWORD returned = 0;
+    bool reachedBoot = false;
+    size_t inspected = 0;
+    while (!reachedBoot && inspected < 1024 &&
+           EvtNext(query, (DWORD)std::size(events), events,
+                   ScanLimits::kEvtNextTimeoutMs, 0, &returned)) {
+        for (DWORD i = 0; i < returned; ++i) {
+            std::wstring xml;
+            bool rendered = RenderEventXml(events[i], xml);
+            EvtClose(events[i]);
+            events[i] = nullptr;
+            if (!rendered)
+                continue;
+            ++inspected;
+
+            FILETIME eventTime = {};
+            std::wstring systemTime = ExtractXmlAttribute(xml, L"<TimeCreated", L"SystemTime");
+            if (SysmonSystemTimeToFileTime(systemTime, eventTime) &&
+                FileTimeToU64(eventTime) < boot) {
+                reachedBoot = true;
+                break;
+            }
+
+            int eventId = _wtoi(ExtractXmlTag(xml, L"EventID").c_str());
+            std::wstring service = ExtractSysmonData(xml, L"ServiceName");
+            if (service.empty()) service = ExtractSysmonData(xml, L"param1");
+            if (service.empty()) service = ExtractSysmonData(xml, L"DriverName");
+            if (service.empty()) continue;
+
+            std::wstring key = ToUpperInvariant(DriverBaseName(service));
+            if (key.size() > 4 && key.substr(key.size() - 4) == L".SYS")
+                key.resize(key.size() - 4);
+            DriverLifecycleEvidence& item = evidence[key];
+
+            std::wstring state = ToUpperInvariant(ExtractSysmonData(xml, L"param2"));
+            std::wstring newStart = ToUpperInvariant(ExtractSysmonData(xml, L"param3"));
+            const bool stopped = state.find(L"STOP") != std::wstring::npos ||
+                                 state.find(L"PARAD") != std::wstring::npos ||
+                                 state.find(L"INTERROMP") != std::wstring::npos;
+            item.stopRequested |= eventId == 7035;
+            item.stopped |= eventId == 7036 && stopped;
+            item.startChanged |= eventId == 7040;
+            item.loadFailed |= eventId == 219 || eventId == 7000 || eventId == 7026;
+            item.installed |= eventId == 7045;
+
+            std::string detail = "SCM eid=" + std::to_string(eventId);
+            if (!state.empty()) detail += " state=" + WideToUtf8(state);
+            if (!newStart.empty()) detail += " new_start=" + WideToUtf8(newStart);
+            if (!systemTime.empty()) detail += " time=" + WideToUtf8(systemTime);
+            AppendLifecycleDetail(item, detail, eventTime);
+        }
+    }
+    EvtClose(query);
+    return evidence;
+}
+
 std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::string& status) {
     FILETIME now = {};
     GetSystemTimeAsFileTime(&now);
@@ -207,6 +295,8 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
 
     std::vector<ScannerUI::KernelDriverFinding> findings;
     std::unordered_set<std::wstring> seenPaths;
+    std::unordered_set<std::wstring> loadedNames;
+    const auto lifecycleEvidence = CollectDriverLifecycleEvidence();
 
 
     LPVOID addrs[4096] = {};
@@ -228,6 +318,10 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
         if (!seenPaths.insert(key).second) continue;
 
         std::wstring base    = DriverBaseName(path);
+        std::wstring loadedName = ToUpperInvariant(base);
+        if (loadedName.size() > 4 && loadedName.substr(loadedName.size() - 4) == L".SYS")
+            loadedName.resize(loadedName.size() - 4);
+        loadedNames.insert(loadedName);
         bool signedOk       = IsAuthenticodeSigned(path);
         bool systemPath     = IsDriverPathSystem(path);
         bool trustedPath    = IsDriverPathTrustedVendor(path);
@@ -312,6 +406,10 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
                 RegCloseKey(svcKey);
                 continue;
             }
+            DWORD startType = SERVICE_DEMAND_START;
+            DWORD startSize = sizeof(startType), startRegType = 0;
+            RegQueryValueExW(svcKey, L"Start", nullptr, &startRegType,
+                             reinterpret_cast<LPBYTE>(&startType), &startSize);
             RegCloseKey(svcKey);
 
             std::wstring rawImg = ExtractDriverImagePath(imgPath);
@@ -333,19 +431,67 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
             bool abusedName = IsKnownAbusedDriverName(base) || IsKnownAbusedDriverName(svcName);
             bool suspiciousName = HasDriverSuspiciousToken(base) || HasDriverSuspiciousToken(svcName) || abusedName;
             bool suspiciousPath = IsDriverPathSuspicious(normPath) && !normPath.empty();
-            if (!suspiciousName && !suspiciousPath)
+
+            std::wstring serviceKey = ToUpperInvariant(svcName);
+            std::wstring baseKey = ToUpperInvariant(base);
+            if (baseKey.size() > 4 && baseKey.substr(baseKey.size() - 4) == L".SYS")
+                baseKey.resize(baseKey.size() - 4);
+            auto lifeIt = lifecycleEvidence.find(serviceKey);
+            if (lifeIt == lifecycleEvidence.end())
+                lifeIt = lifecycleEvidence.find(baseKey);
+            const DriverLifecycleEvidence* life =
+                lifeIt == lifecycleEvidence.end() ? nullptr : &lifeIt->second;
+            const bool currentlyLoaded = loadedNames.count(serviceKey) || loadedNames.count(baseKey);
+            const bool stoppedUnloaded = life && life->stopped && !currentlyLoaded;
+            const bool stopControlled = stoppedUnloaded && life->stopRequested;
+            const bool stopActivity = life && (life->stopRequested || life->stopped);
+            const bool startChanged = life && life->startChanged;
+            const bool loadFailed = life && life->loadFailed;
+            const bool riskyInstall = life && life->installed &&
+                                      (!signedOk || suspiciousPath || suspiciousName);
+            const bool lifecycleSignal = stopActivity || startChanged || loadFailed || riskyInstall;
+
+            if (!suspiciousName && !suspiciousPath && fileExists && !lifecycleSignal)
                 continue;
-            if (fileExists && signedOk && trustedPath && !suspiciousName)
+            if (fileExists && signedOk && trustedPath && !suspiciousName && !lifecycleSignal)
                 continue;
 
-            std::string severity = abusedName && !suspiciousPath ? "MEDIUM" : suspiciousName ? "HIGH" : "MEDIUM";
-            std::string reason = suspiciousName ?
-                (abusedName ? "kernel driver service matches known abused/vulnerable driver family" : "kernel driver service with cheat-like name") :
-                "kernel driver service registered in suspicious path";
+            std::string severity = "MEDIUM";
+            std::string reason;
+            if (!fileExists && lifecycleSignal) {
+                severity = "HIGH";
+                reason = "driver service image removed after lifecycle activity";
+            } else if (stopControlled) {
+                severity = (!signedOk || suspiciousPath || suspiciousName) ? "HIGH" : "MEDIUM";
+                reason = "driver received stop control and is no longer loaded";
+            } else if (stoppedUnloaded) {
+                severity = (!signedOk || suspiciousPath || suspiciousName) ? "HIGH" : "MEDIUM";
+                reason = "driver stopped or unloaded after boot";
+            } else if (stopActivity) {
+                severity = (!signedOk || suspiciousPath || suspiciousName) ? "HIGH" : "MEDIUM";
+                reason = "driver stop/restart activity detected after boot";
+            } else if (loadFailed) {
+                severity = (!signedOk || !fileExists) ? "HIGH" : "MEDIUM";
+                reason = "driver failed to load after boot";
+            } else if (startChanged) {
+                reason = "driver start configuration changed after boot";
+            } else if (!fileExists) {
+                reason = "registered driver image is missing from disk";
+            } else if (suspiciousName) {
+                severity = abusedName && !suspiciousPath ? "MEDIUM" : "HIGH";
+                reason = abusedName ? "kernel driver service matches known abused/vulnerable driver family" :
+                                      "kernel driver service with cheat-like name";
+            } else {
+                reason = "kernel driver service registered in suspicious path";
+            }
 
             std::string detail = "service=" + WideToUtf8(svcName) +
                                  " | signed=" + (signedOk ? "yes" : fileExists ? "no" : "file_missing") +
-                                 " | type=" + (svcType == 1 ? "KERNEL_DRIVER" : "FS_DRIVER");
+                                 " | type=" + (svcType == 1 ? "KERNEL_DRIVER" : "FS_DRIVER") +
+                                 " | start=" + std::to_string(startType) +
+                                 " | loaded=" + (currentlyLoaded ? "yes" : "no");
+            if (life && !life->detail.empty())
+                detail += " | lifecycle=" + life->detail;
 
             ScannerUI::KernelDriverFinding f;
             f.date = date; f.time = timeStr;
@@ -353,7 +499,7 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
             f.path = WideToUtf8(normPath.empty() ? rawImg : normPath);
             f.reason = reason;
             f.detail = detail;
-            f.suspicious = suspiciousName || suspiciousPath || !signedOk;
+            f.suspicious = severity == "HIGH" || stoppedUnloaded || startChanged || loadFailed || riskyInstall;
             findings.push_back(f);
             seenPaths.insert(pKey);
         }
@@ -369,7 +515,7 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
 
     size_t suspicious = 0;
     for (const auto& f : findings) if (f.suspicious) ++suspicious;
-    status = suspicious > 0 ? "DETECTED" : "OK";
+    status = suspicious > 0 ? "DETECTED" : findings.empty() ? "OK" : "REVIEW";
     return findings;
 }
 
@@ -632,20 +778,42 @@ static void DowngradeDriverFinding(ScannerUI::DriverIntegrityFinding& f,
     f.suspicious = suspicious;
 }
 
+// Memoizes the single most recently read driver file. CollectDriverIntegrityFindings
+// calls this (directly or via FindHookedExports/DetectPEOverlay) several times in a
+// row for the SAME path while analyzing one driver before moving to the next, so a
+// 1-entry cache turns up to ~6 disk reads per driver into 1 without changing any
+// caller's signature or behavior for a given path.
 static bool ReadWholeDriverFile(const std::wstring& path, std::vector<uint8_t>& file) {
+    static std::wstring s_cachedPath;
+    static std::vector<uint8_t> s_cachedBuffer;
+    static bool s_cachedOk = false;
+
+    if (path == s_cachedPath) {
+        file = s_cachedBuffer;
+        return s_cachedOk;
+    }
+
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER fsz = {};
-    if (!GetFileSizeEx(h, &fsz) || fsz.QuadPart < 0x400 || fsz.QuadPart > 256LL * 1024 * 1024) {
+    std::vector<uint8_t> buf;
+    bool ok = false;
+    if (h != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER fsz = {};
+        if (GetFileSizeEx(h, &fsz) && fsz.QuadPart >= 0x400 && fsz.QuadPart <= 256LL * 1024 * 1024) {
+            buf.resize((size_t)fsz.QuadPart);
+            DWORD rd = 0;
+            ok = ReadFile(h, buf.data(), (DWORD)buf.size(), &rd, nullptr) && rd == (DWORD)buf.size();
+        }
         CloseHandle(h);
-        return false;
     }
-    file.resize((size_t)fsz.QuadPart);
-    DWORD rd = 0;
-    bool ok = ReadFile(h, file.data(), (DWORD)file.size(), &rd, nullptr) && rd == (DWORD)file.size();
-    CloseHandle(h);
+    if (!ok)
+        buf.clear();
+
+    s_cachedPath   = path;
+    s_cachedBuffer = buf;
+    s_cachedOk     = ok;
+    file = std::move(buf);
     return ok;
 }
 
@@ -1464,7 +1632,12 @@ static std::unordered_map<std::wstring, std::string> CollectDriverEventEvidenceM
                 std::string stamp;
                 if (!systemTime.empty())
                     stamp = " time=" + WideToUtf8(systemTime);
-                std::string itemEvidence = source + stamp;
+                std::wstring eventId = ExtractXmlTag(xml, L"EventID");
+                std::wstring state = ExtractSysmonData(xml, L"param2");
+                std::string itemEvidence = source;
+                if (!eventId.empty()) itemEvidence += " eid=" + WideToUtf8(eventId);
+                if (!state.empty()) itemEvidence += " state=" + WideToUtf8(state);
+                itemEvidence += stamp;
                 if (!p.empty()) {
                     std::wstring norm = NormalizeDosDriverPath(p);
                     AddEvidence(evidence, norm, itemEvidence);
@@ -1484,7 +1657,8 @@ static std::unordered_map<std::wstring, std::string> CollectDriverEventEvidenceM
                 L"ImageLoaded");
 
     scanChannel(L"System",
-                L"*[System[Provider[@Name='Service Control Manager'] and (EventID=7045 or EventID=7000 or EventID=7009 or EventID=7011 or EventID=7036)]]",
+                L"*[System[((Provider[@Name='Service Control Manager']) and "
+                L"(EventID=7000 or EventID=7009 or EventID=7011 or EventID=7026 or EventID=7035 or EventID=7036 or EventID=7040 or EventID=7045)) or EventID=219]]",
                 "System SCM driver/service event",
                 L"param2",
                 L"param1");
@@ -1604,18 +1778,8 @@ static std::vector<std::string> FindHookedExports(
     const std::unordered_set<std::string>& targets)
 {
     std::vector<std::string> hooked;
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return hooked;
-    LARGE_INTEGER fsz = {};
-    GetFileSizeEx(h, &fsz);
-    if (fsz.QuadPart > 256LL * 1024 * 1024 || fsz.QuadPart < 0x400) { CloseHandle(h); return hooked; }
-    std::vector<uint8_t> file((size_t)fsz.QuadPart);
-    DWORD rd = 0;
-    bool ok = ReadFile(h, file.data(), (DWORD)file.size(), &rd, nullptr) && rd == (DWORD)file.size();
-    CloseHandle(h);
-    if (!ok) return hooked;
+    std::vector<uint8_t> file;
+    if (!ReadWholeDriverFile(path, file)) return hooked;
 
     const uint8_t* base = file.data(); size_t sz = file.size();
     if (sz < 0x40 || base[0] != 'M' || base[1] != 'Z') return hooked;
@@ -1690,19 +1854,9 @@ static bool VerifyPEChecksum(const std::wstring& path) {
 
 
 static bool DetectPEOverlay(const std::wstring& path) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER fsz = {};
-    GetFileSizeEx(h, &fsz);
-    DWORD fileSize = (DWORD)fsz.QuadPart;
-    if (fsz.QuadPart > 256LL * 1024 * 1024 || fsz.QuadPart < 0x400) { CloseHandle(h); return false; }
-    std::vector<uint8_t> file(fileSize);
-    DWORD rd = 0;
-    bool ok = ReadFile(h, file.data(), fileSize, &rd, nullptr) && rd == fileSize;
-    CloseHandle(h);
-    if (!ok) return false;
+    std::vector<uint8_t> file;
+    if (!ReadWholeDriverFile(path, file)) return false;
+    DWORD fileSize = (DWORD)file.size();
     const uint8_t* base = file.data();
     if (base[0] != 'M' || base[1] != 'Z') return false;
     LONG peOff = *reinterpret_cast<const LONG*>(base + 0x3C);
@@ -2808,7 +2962,7 @@ std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(st
         {
             int n7036 = 0;
             size_t pos = 0;
-            while ((pos = logEvidence.find("7036", pos)) != std::string::npos) { ++n7036; pos += 4; }
+            while ((pos = logEvidence.find("eid=7036", pos)) != std::string::npos) { ++n7036; pos += 8; }
             if (n7036 >= 2) {
                 serviceRestarted = true;
                 EscalateDriverFinding(f, "MEDIUM", "driver service restarted after boot (stop/start cycle detected)");
@@ -3726,12 +3880,12 @@ static std::wstring ClsidAsciiToWide(const std::string& s) {
 // Read the InprocServer32 or LocalServer32 default value for a CLSID key.
 // Returns the (expanded, normalized) server path and the server subkey name.
 static std::wstring ReadClsidServerPath(HKEY root, const std::wstring& clsidKeyPath,
-                                        std::string& outServerType) {
+                                        std::string& outServerType, REGSAM view = 0) {
     static const wchar_t* kSrvKeys[] = { L"InprocServer32", L"LocalServer32", nullptr };
     for (int si = 0; kSrvKeys[si]; ++si) {
         std::wstring subPath = clsidKeyPath + L"\\" + kSrvKeys[si];
         HKEY hSrv = nullptr;
-        if (RegOpenKeyExW(root, subPath.c_str(), 0, KEY_READ, &hSrv) != ERROR_SUCCESS)
+        if (RegOpenKeyExW(root, subPath.c_str(), 0, KEY_READ | view, &hSrv) != ERROR_SUCCESS)
             continue;
         wchar_t val[MAX_PATH * 2] = {}; DWORD valSz = sizeof(val), valType = 0;
         LSTATUS st = RegQueryValueExW(hSrv, nullptr, nullptr, &valType,
@@ -3739,10 +3893,393 @@ static std::wstring ReadClsidServerPath(HKEY root, const std::wstring& clsidKeyP
         RegCloseKey(hSrv);
         if (st == ERROR_SUCCESS && (valType == REG_SZ || valType == REG_EXPAND_SZ) && val[0]) {
             outServerType = WideToUtf8(kSrvKeys[si]);
-            return NormalizeDosDriverPath(val);
+            std::wstring path = NormalizeDosDriverPath(val);
+            std::wstring upper = ToUpperInvariant(path);
+            const wchar_t* extensions[] = { L".DLL", L".EXE", L".OCX", L".CPL", nullptr };
+            size_t imageEnd = std::wstring::npos;
+            for (const wchar_t** ext = extensions; *ext; ++ext) {
+                size_t pos = upper.find(*ext);
+                if (pos != std::wstring::npos) {
+                    size_t end = pos + wcslen(*ext);
+                    imageEnd = imageEnd == std::wstring::npos ? end : (std::min)(imageEnd, end);
+                }
+            }
+            if (imageEnd != std::wstring::npos)
+                path.resize(imageEnd);
+            return path;
         }
     }
     return L"";
+}
+
+static bool IsClsidGuidName(const std::wstring& name) {
+    CLSID value = {};
+    return name.size() == 38 && CLSIDFromString(name.c_str(), &value) == S_OK;
+}
+
+static bool IsNonDllNamedPeWithDllEntryPoint(const std::wstring& path) {
+    const std::wstring upper = ToUpperInvariant(path);
+    const size_t slash = upper.find_last_of(L"\\/");
+    const size_t dot = upper.find_last_of(L'.');
+    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash) &&
+        upper.substr(dot) == L".DLL") {
+        return false;
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+    IMAGE_DOS_HEADER dos = {};
+    DWORD read = 0;
+    bool valid = ReadFile(file, &dos, sizeof(dos), &read, nullptr) &&
+                 read == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+                 dos.e_lfanew > 0;
+
+    LARGE_INTEGER offset = {};
+    offset.QuadPart = dos.e_lfanew;
+    if (valid)
+        valid = SetFilePointerEx(file, offset, nullptr, FILE_BEGIN) != FALSE;
+
+    DWORD signature = 0;
+    IMAGE_FILE_HEADER fileHeader = {};
+    if (valid) {
+        valid = ReadFile(file, &signature, sizeof(signature), &read, nullptr) &&
+                read == sizeof(signature) && signature == IMAGE_NT_SIGNATURE &&
+                ReadFile(file, &fileHeader, sizeof(fileHeader), &read, nullptr) &&
+                read == sizeof(fileHeader) &&
+                (fileHeader.Characteristics & IMAGE_FILE_DLL) != 0 &&
+                fileHeader.SizeOfOptionalHeader >= 20;
+    }
+
+    BYTE optionalPrefix[20] = {};
+    if (valid) {
+        valid = ReadFile(file, optionalPrefix, sizeof(optionalPrefix), &read, nullptr) &&
+                read == sizeof(optionalPrefix);
+    }
+    CloseHandle(file);
+
+    if (!valid)
+        return false;
+    WORD magic = 0;
+    DWORD entryPoint = 0;
+    memcpy(&magic, optionalPrefix, sizeof(magic));
+    memcpy(&entryPoint, optionalPrefix + 16, sizeof(entryPoint));
+    return (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+            magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) && entryPoint != 0;
+}
+
+static bool IsOfficialMicrosoftAdoServer(const std::wstring& path) {
+    wchar_t commonFiles[MAX_PATH] = {};
+    wchar_t commonFilesX86[MAX_PATH] = {};
+    ExpandEnvironmentStringsW(L"%CommonProgramFiles%", commonFiles, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%CommonProgramFiles(x86)%", commonFilesX86, MAX_PATH);
+
+    const std::wstring upper = ToUpperInvariant(path);
+    const std::wstring expected64 =
+        ToUpperInvariant(std::wstring(commonFiles) + L"\\System\\ado\\msado15.dll");
+    const std::wstring expected32 =
+        ToUpperInvariant(std::wstring(commonFilesX86) + L"\\System\\ado\\msado15.dll");
+    if (upper != expected64 && upper != expected32)
+        return false;
+
+    // Some Windows images lack cached revocation data, making the strict offline
+    // trust pass inconclusive. For this exact OS-owned ADO path, accept a normal
+    // Authenticode chain only when the embedded signer is Microsoft.
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = path.c_str();
+
+    WINTRUST_DATA trustData = {};
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    const LONG trustStatus = WinVerifyTrust(nullptr, &action, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &action, &trustData);
+    if (trustStatus != ERROR_SUCCESS)
+        return false;
+
+    const std::wstring signer = DetectionFilter::GetSignerCommonNameUpperCached(path);
+    return signer.compare(0, 9, L"MICROSOFT") == 0;
+}
+
+static bool IsStandardClsidServerPath(const std::wstring& path, bool signedFile) {
+    if (path.empty())
+        return false;
+    std::wstring upper = ToUpperInvariant(path);
+    wchar_t windowsDir[MAX_PATH] = {};
+    wchar_t programFiles[MAX_PATH] = {};
+    wchar_t programFilesX86[MAX_PATH] = {};
+    GetWindowsDirectoryW(windowsDir, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%ProgramFiles%", programFiles, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%ProgramFiles(x86)%", programFilesX86, MAX_PATH);
+
+    std::wstring windows = ToUpperInvariant(windowsDir);
+    const bool systemPath =
+        upper.rfind(windows + L"\\SYSTEM32\\", 0) == 0 ||
+        upper.rfind(windows + L"\\SYSWOW64\\", 0) == 0 ||
+        upper.rfind(windows + L"\\WINSXS\\", 0) == 0;
+    if (systemPath)
+        return true;
+
+    const std::wstring pf = ToUpperInvariant(programFiles);
+    const std::wstring pf86 = ToUpperInvariant(programFilesX86);
+    const bool vendorPath = (!pf.empty() && upper.rfind(pf + L"\\", 0) == 0) ||
+                            (!pf86.empty() && upper.rfind(pf86 + L"\\", 0) == 0);
+    return vendorPath && signedFile;
+}
+
+static std::wstring ReadRegistryDefaultString(HKEY root, const std::wstring& path, REGSAM view) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, path.c_str(), 0, KEY_READ | view, &key) != ERROR_SUCCESS)
+        return {};
+    wchar_t value[512] = {};
+    DWORD size = sizeof(value), type = 0;
+    LSTATUS result = RegQueryValueExW(key, nullptr, nullptr, &type,
+                                      reinterpret_cast<LPBYTE>(value), &size);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ)
+        ? std::wstring(value) : std::wstring{};
+}
+
+static void CollectMachineClsidPathDeviations(
+    REGSAM view, const char* viewName, const std::string& date, const std::string& timeStr,
+    std::vector<ScannerUI::ClsidFinding>& findings) {
+    constexpr const wchar_t* rootPath = L"SOFTWARE\\Classes\\CLSID";
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, rootPath, 0, KEY_READ | view, &root) != ERROR_SUCCESS)
+        return;
+
+    std::unordered_map<std::wstring, bool> trustedServers;
+    std::unordered_map<std::wstring, bool> clsidPayloads;
+
+    for (DWORD index = 0; findings.size() < 400; ++index) {
+        wchar_t guid[128] = {};
+        DWORD length = static_cast<DWORD>(std::size(guid));
+        LSTATUS result = RegEnumKeyExW(root, index, guid, &length, nullptr, nullptr, nullptr, nullptr);
+        if (result == ERROR_NO_MORE_ITEMS)
+            break;
+        if (result != ERROR_SUCCESS || !IsClsidGuidName(guid))
+            continue;
+
+        std::wstring clsidPath = std::wstring(rootPath) + L"\\" + guid;
+        std::string serverType;
+        std::wstring serverPath = ReadClsidServerPath(HKEY_LOCAL_MACHINE, clsidPath, serverType, view);
+        if (serverPath.empty())
+            continue;
+
+        const bool exists = FileExistsW(serverPath);
+        const std::wstring serverKey = ToUpperInvariant(serverPath);
+        auto payloadIt = clsidPayloads.find(serverKey);
+        const bool clsidPayload = payloadIt != clsidPayloads.end()
+            ? payloadIt->second
+            : clsidPayloads.emplace(serverKey,
+                  exists && IsNonDllNamedPeWithDllEntryPoint(serverPath)).first->second;
+        if (!clsidPayload)
+            continue;
+
+        auto trustIt = trustedServers.find(serverKey);
+        bool signedFile = false;
+        if (trustIt != trustedServers.end()) {
+            signedFile = trustIt->second;
+        } else {
+            signedFile = exists &&
+                (DetectionFilter::IsTrustedSignedCached(serverPath) ||
+                 IsOfficialMicrosoftAdoServer(serverPath));
+            trustedServers.emplace(serverKey, signedFile);
+        }
+        if (IsStandardClsidServerPath(serverPath, signedFile))
+            continue;
+
+        DetectionFilter::PathClass pathClass = DetectionFilter::ClassifyPath(serverPath);
+        const bool writablePath =
+            pathClass == DetectionFilter::PathClass::TempOrInstaller ||
+            pathClass == DetectionFilter::PathClass::UserProfile ||
+            pathClass == DetectionFilter::PathClass::Removable ||
+            pathClass == DetectionFilter::PathClass::Unknown ||
+            pathClass == DetectionFilter::PathClass::Unmapped;
+
+        ScannerUI::ClsidFinding finding;
+        finding.date = date;
+        finding.time = timeStr;
+        finding.clsid = WideToUtf8(guid);
+        finding.friendlyName = WideToUtf8(ReadRegistryDefaultString(
+            HKEY_LOCAL_MACHINE, clsidPath, view));
+        finding.hivePath = std::string("HKLM-") + viewName;
+        finding.serverType = serverType;
+        finding.serverPath = WideToUtf8(serverPath);
+        finding.fileExists = exists;
+        finding.isSigned = signedFile;
+        finding.canClean = false;
+        finding.severity = (!exists || (!signedFile && writablePath)) ? "HIGH" :
+                           !signedFile ? "MEDIUM" : "FLAG";
+        finding.reason = !exists
+            ? "CLSID server points to a missing file outside standard locations"
+            : signedFile
+                ? "CLSID server is signed but outside standard COM locations"
+                : "CLSID server is unsigned and outside standard COM locations";
+        finding.detail = "technique=clsid_path_deviation | view=" + std::string(viewName) +
+                         " | path_class=" + DetectionFilter::PathClassName(pathClass) +
+                         " | signed=" + (signedFile ? std::string("yes") : std::string("no"));
+        findings.push_back(std::move(finding));
+    }
+    RegCloseKey(root);
+}
+
+static std::unordered_set<std::wstring> EnumerateClsidNamesWin32(HKEY root) {
+    std::unordered_set<std::wstring> names;
+    for (DWORD index = 0;; ++index) {
+        wchar_t name[128] = {};
+        DWORD length = static_cast<DWORD>(std::size(name));
+        LSTATUS result = RegEnumKeyExW(root, index, name, &length, nullptr, nullptr, nullptr, nullptr);
+        if (result == ERROR_NO_MORE_ITEMS)
+            break;
+        if (result == ERROR_SUCCESS && IsClsidGuidName(name))
+            names.insert(ToUpperInvariant(name));
+    }
+    return names;
+}
+
+static void CollectHiddenClsidKeys(HKEY hive, const wchar_t* path, REGSAM view,
+                                   const char* hiveName, const std::string& date,
+                                   const std::string& timeStr,
+                                   std::vector<ScannerUI::ClsidFinding>& findings) {
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(hive, path, 0, KEY_READ | view, &root) != ERROR_SUCCESS)
+        return;
+
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    using NtEnumerateKeyFn = NTSTATUS (WINAPI*)(HANDLE, ULONG, ULONG, PVOID, ULONG, PULONG);
+    auto ntEnumerateKey = ntdll ? reinterpret_cast<NtEnumerateKeyFn>(
+        GetProcAddress(ntdll, "NtEnumerateKey")) : nullptr;
+    if (!ntEnumerateKey) {
+        RegCloseKey(root);
+        return;
+    }
+
+    std::unordered_set<std::wstring> first = EnumerateClsidNamesWin32(root);
+    struct KeyBasicInfo {
+        LARGE_INTEGER LastWriteTime;
+        ULONG TitleIndex;
+        ULONG NameLength;
+        WCHAR Name[1];
+    };
+    std::vector<std::wstring> candidates;
+    std::vector<BYTE> buffer(1024);
+    for (ULONG index = 0;; ++index) {
+        ULONG returned = 0;
+        NTSTATUS result = ntEnumerateKey(root, index, 0, buffer.data(),
+                                         static_cast<ULONG>(buffer.size()), &returned);
+        if (result == static_cast<NTSTATUS>(0x80000005L) ||
+            result == static_cast<NTSTATUS>(0xC0000023L)) {
+            buffer.resize(returned + 64);
+            result = ntEnumerateKey(root, index, 0, buffer.data(),
+                                    static_cast<ULONG>(buffer.size()), &returned);
+        }
+        if (result == static_cast<NTSTATUS>(0x8000001AL) || result < 0)
+            break;
+        const auto* info = reinterpret_cast<const KeyBasicInfo*>(buffer.data());
+        if (info->NameLength == 0 || info->NameLength > 256)
+            continue;
+        std::wstring name(info->Name, info->NameLength / sizeof(wchar_t));
+        if (IsClsidGuidName(name) && first.count(ToUpperInvariant(name)) == 0)
+            candidates.push_back(std::move(name));
+    }
+
+    std::unordered_set<std::wstring> second = EnumerateClsidNamesWin32(root);
+    RegCloseKey(root);
+    for (const auto& name : candidates) {
+        if (second.count(ToUpperInvariant(name)) || findings.size() >= 400)
+            continue;
+        ScannerUI::ClsidFinding finding;
+        finding.date = date;
+        finding.time = timeStr;
+        finding.severity = "HIGH";
+        finding.clsid = WideToUtf8(name);
+        finding.friendlyName = "Hidden CLSID";
+        finding.hivePath = hiveName;
+        finding.serverType = "Hidden";
+        finding.serverPath = "-";
+        finding.reason = "CLSID visible through NtEnumerateKey but hidden from Win32 registry APIs";
+        finding.detail = "technique=registry_api_hiding | confirmed_by=two_win32_passes";
+        finding.canClean = false;
+        findings.push_back(std::move(finding));
+    }
+}
+
+static void CollectDeletedClsidEvents(const std::string& fallbackDate,
+                                      const std::string& fallbackTime,
+                                      std::vector<ScannerUI::ClsidFinding>& findings) {
+    EVT_HANDLE query = EvtQuery(nullptr, L"Microsoft-Windows-Sysmon/Operational",
+                                L"*[System[(EventID=12)]]",
+                                EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!query)
+        return;
+
+    FILETIME boot = GetBootFileTime();
+    const ULONGLONG bootTime = FileTimeToU64(boot);
+    std::unordered_set<std::wstring> seen;
+    EVT_HANDLE events[16] = {};
+    DWORD returned = 0;
+    size_t inspected = 0;
+    bool reachedBoot = false;
+    while (!reachedBoot && inspected < 512 && findings.size() < 400 &&
+           EvtNext(query, static_cast<DWORD>(std::size(events)), events,
+                   ScanLimits::kEvtNextTimeoutMs, 0, &returned)) {
+        for (DWORD i = 0; i < returned; ++i) {
+            ++inspected;
+            std::wstring xml;
+            if (RenderEventXml(events[i], xml)) {
+                FILETIME eventTime = {};
+                std::wstring systemTime = ExtractXmlAttribute(xml, L"<TimeCreated", L"SystemTime");
+                if (SysmonSystemTimeToFileTime(systemTime, eventTime) &&
+                    FileTimeToU64(eventTime) < bootTime) {
+                    reachedBoot = true;
+                } else {
+                    std::wstring eventType = ToUpperInvariant(ExtractSysmonData(xml, L"EventType"));
+                    std::wstring target = ExtractSysmonData(xml, L"TargetObject");
+                    std::wstring targetUpper = ToUpperInvariant(target);
+                    size_t marker = targetUpper.find(L"\\CLSID\\");
+                    if (eventType.find(L"DELETE") != std::wstring::npos &&
+                        marker != std::wstring::npos && seen.insert(targetUpper).second) {
+                        size_t guidStart = marker + 7;
+                        size_t guidEnd = target.find(L'\\', guidStart);
+                        std::wstring guid = target.substr(guidStart, guidEnd - guidStart);
+                        if (IsClsidGuidName(guid)) {
+                            ScannerUI::ClsidFinding finding;
+                            finding.date = fallbackDate;
+                            finding.time = fallbackTime;
+                            if (eventTime.dwLowDateTime || eventTime.dwHighDateTime)
+                                FileTimeToLocalStrings(eventTime, finding.date, finding.time);
+                            finding.severity = "MEDIUM";
+                            finding.clsid = WideToUtf8(guid);
+                            finding.friendlyName = "Deleted CLSID";
+                            finding.hivePath = WideToUtf8(target.substr(0, marker));
+                            finding.serverType = "Deleted";
+                            finding.serverPath = "-";
+                            finding.reason = "CLSID registry key deletion recorded by Sysmon";
+                            finding.detail = "technique=clsid_deleted | source=Sysmon Event 12"
+                                             " | image=" + WideToUtf8(ExtractSysmonData(xml, L"Image")) +
+                                             " | target=" + WideToUtf8(target);
+                            finding.canClean = false;
+                            findings.push_back(std::move(finding));
+                        }
+                    }
+                }
+            }
+            EvtClose(events[i]);
+        }
+    }
+    EvtClose(query);
 }
 
 std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& status) {
@@ -3752,6 +4289,18 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
     FileTimeToLocalStrings(now, date, timeStr);
 
     std::vector<ScannerUI::ClsidFinding> findings;
+    std::unordered_map<std::wstring, bool> clsidPayloads;
+    auto isRequestedClsidPayload = [&clsidPayloads](const std::wstring& path) {
+        if (path.empty())
+            return false;
+        const std::wstring key = ToUpperInvariant(path);
+        auto it = clsidPayloads.find(key);
+        if (it != clsidPayloads.end())
+            return it->second;
+        const bool matches = FileExistsW(path) && IsNonDllNamedPeWithDllEntryPoint(path);
+        clsidPayloads.emplace(key, matches);
+        return matches;
+    };
 
     // ── Phase 1: Enumerate HKCU\SOFTWARE\Classes\CLSID ────────────────────────
     // Any CLSID here that also exists in HKCR = COM hijack (no admin needed).
@@ -3801,6 +4350,8 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
             std::wstring serverPathW = ReadClsidServerPath(HKEY_CURRENT_USER, hkuKeyPath, serverType);
 
             bool fileExists = !serverPathW.empty() && FileExistsW(serverPathW);
+            if (!isRequestedClsidPayload(serverPathW))
+                continue;
             bool isSigned   = fileExists && IsAuthenticodeSigned(serverPathW);
 
             // Classify the server path
@@ -3921,6 +4472,8 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
         std::string serverType;
         std::wstring serverPathW = ReadClsidServerPath(HKEY_CURRENT_USER, hkuPath, serverType);
         bool fileExists = !serverPathW.empty() && FileExistsW(serverPathW);
+        if (!isRequestedClsidPayload(serverPathW))
+            continue;
         bool isSigned   = fileExists && IsAuthenticodeSigned(serverPathW);
 
         std::string hkcrServerType;
@@ -3970,6 +4523,16 @@ std::vector<ScannerUI::ClsidFinding> CollectClsidHijackFindings(std::string& sta
         f.detail       = "technique=clsid_hkcu_override | known_target=yes";
         findings.push_back(std::move(f));
     }
+
+    CollectHiddenClsidKeys(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID",
+                           KEY_WOW64_64KEY, "HKLM-64", date, timeStr, findings);
+    CollectHiddenClsidKeys(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID",
+                           KEY_WOW64_32KEY, "HKLM-32", date, timeStr, findings);
+    CollectHiddenClsidKeys(HKEY_CURRENT_USER, L"SOFTWARE\\Classes\\CLSID",
+                           0, "HKCU", date, timeStr, findings);
+    CollectDeletedClsidEvents(date, timeStr, findings);
+    CollectMachineClsidPathDeviations(KEY_WOW64_64KEY, "64", date, timeStr, findings);
+    CollectMachineClsidPathDeviations(KEY_WOW64_32KEY, "32", date, timeStr, findings);
 
     std::sort(findings.begin(), findings.end(), [](const auto& a, const auto& b) {
         if (a.severity != b.severity) return a.severity > b.severity;

@@ -67,11 +67,16 @@ static BOOL CALLBACK CaptureExcludeProc(HWND hWnd, LPARAM lParam) {
     if (IsWhitelistedCaptureProcess(procName))
         return TRUE;
 
+    bool signed_ = !procPath.empty() && IsAuthenticodeSigned(procPath);
+
     char title[256] = {};
     GetWindowTextA(hWnd, title, sizeof(title));
 
     std::string detail = "Window excluded from all screen capture (WDA_EXCLUDEFROMCAPTURE)";
     if (title[0]) { detail += ": \""; detail += title; detail += "\""; }
+    detail += signed_ ? " [process signed]" : " [process unsigned]";
+
+    std::string sev = signed_ ? "MEDIUM" : "HIGH";
 
     auto* ctx = reinterpret_cast<CaptureExcludeCtx*>(lParam);
     AddStreamModFinding(*ctx->out,
@@ -79,7 +84,7 @@ static BOOL CALLBACK CaptureExcludeProc(HWND hWnd, LPARAM lParam) {
         WideToUtf8(procPath),
         title[0] ? std::string(title) : WideToUtf8(procName),
         detail,
-        "HIGH");
+        sev);
     return TRUE;
 }
 
@@ -150,7 +155,7 @@ static void ScanStreamingPlugins(std::vector<ScannerUI::StreamModFinding>& out) 
                 else
                     detail = "Unsigned OBS plugin (entropy=" + EntropyStr(entropy) + ")";
 
-                std::string sev = (suspicious || packed) ? "HIGH" : "MEDIUM";
+                std::string sev = (suspicious || packed) ? "HIGH" : "FLAG";
                 AddStreamModFinding(out, "OBS_PLUGIN", WideToUtf8(dir),
                                     WideToUtf8(pluginPath), detail, sev);
             }
@@ -226,13 +231,35 @@ static void ScanObsRuntimeModules(std::vector<ScannerUI::StreamModFinding>& out)
                 // Remaining module is not from OBS or Windows — check signature
                 if (IsAuthenticodeSigned(mod.path)) continue;
 
+                // Unsigned modules commonly reaching this point are legitimate but
+                // unsigned/self-signed overlay-hook DLLs (Discord, RTSS, Steam) that
+                // inject into every D3D/OpenGL/Vulkan-rendering process system-wide,
+                // including OBS itself. Downgrade instead of suppressing: a name match
+                // is not a trust signal on its own, so it stays visible at MEDIUM.
+                std::wstring modName = BaseNameFromPath(mod.path);
+                auto modCls = DetectionFilter::ClassifyPath(mod.path);
+                bool trustedDir = DetectionFilter::IsTrustedDir(modCls);
+
+                std::string sev, reason;
+                if (DetectionFilter::IsNamedLikeOverlay(modName)) {
+                    sev = "MEDIUM";
+                    reason = "unsigned mas corresponde a padrao de nome de DLL de overlay conhecida "
+                             "(Discord/Steam/RTSS/OBS-graphics-hook) - verificar autenticidade";
+                } else if (trustedDir) {
+                    sev = "MEDIUM";
+                    reason = "modulo nao assinado em path Program Files/sistema confiavel - confianca menor de injecao ao vivo";
+                } else {
+                    sev = "HIGH";
+                    reason = "possivel injecao em tempo de execucao";
+                }
+
                 std::string detail = "Unsigned non-OBS module loaded in " +
                                      WideToUtf8(std::wstring(pe.szExeFile)) +
-                                     " — possible runtime injection";
+                                     " - " + reason;
                 AddStreamModFinding(out, "OBS_INJECT",
                                     WideToUtf8(obsPath),
                                     WideToUtf8(mod.path),
-                                    detail, "HIGH");
+                                    detail, sev);
             }
         }
         CloseHandle(hProc);
@@ -408,6 +435,32 @@ static uintptr_t FindModuleBase(const std::vector<ModuleRange>& modules, const w
     return 0;
 }
 
+// M4: Resolve the single-hop destination of a detected trampoline (not a multi-hop
+// chain — one hop is enough to distinguish "redirects into a signed module" from
+// "redirects into anonymous/unsigned memory").
+static uintptr_t ComputeHookDestination(HANDLE hProc, uintptr_t hookAddr, const BYTE* buf, size_t len) {
+    if (len >= 5 && buf[0] == 0xE9) {                                   // JMP rel32
+        INT32 rel = *reinterpret_cast<const INT32*>(buf + 1);
+        return hookAddr + 5 + (uintptr_t)(intptr_t)rel;
+    }
+    if (len >= 6 && buf[0] == 0xFF && buf[1] == 0x25) {                 // JMP [rip+disp32]
+        INT32 disp = *reinterpret_cast<const INT32*>(buf + 2);
+        uintptr_t slot = hookAddr + 6 + (uintptr_t)(intptr_t)disp;
+        uintptr_t dest = 0; SIZE_T r = 0;
+        if (!ReadProcessMemory(hProc, reinterpret_cast<LPCVOID>(slot), &dest, sizeof(dest), &r) || r < sizeof(dest))
+            return 0;
+        return dest;
+    }
+    if (len >= 6 && buf[0] == 0x68 && buf[5] == 0xC3) {                 // PUSH imm32; RET
+        DWORD imm = *reinterpret_cast<const DWORD*>(buf + 1);
+        return (uintptr_t)imm;
+    }
+    if (len >= 12 && buf[0] == 0x48 && buf[1] == 0xB8 && buf[10] == 0xFF && buf[11] == 0xE0) { // MOV RAX,imm64; JMP RAX
+        return *reinterpret_cast<const uintptr_t*>(buf + 2);
+    }
+    return 0;
+}
+
 struct HookCheckEntry { const wchar_t* dll; const char* func; };
 
 static void ScanDwmInlineHooks(HANDLE hProc, const std::vector<ModuleRange>& modules,
@@ -452,11 +505,28 @@ static void ScanDwmInlineHooks(HANDLE hProc, const std::vector<ModuleRange>& mod
         std::string patternDesc;
         if (!IsHookPattern(buf, read, patternDesc)) continue;
 
+        uintptr_t dest = ComputeHookDestination(hProc, remoteFunc, buf, read);
+        std::string sev = "HIGH";
+        std::string destNote;
+        if (dest) {
+            auto trust = DetectionFilter::ResolveModuleTrustAtAddress(hProc, dest);
+            if (trust.resolved && trust.signedTrusted) {
+                sev = trust.exportsGraphics ? "MEDIUM" : "FLAG";
+                destNote = " -> redireciona para modulo assinado: " + WideToUtf8(trust.path);
+            } else if (trust.resolved) {
+                destNote = " -> redireciona para modulo NAO assinado: " + WideToUtf8(trust.path);
+            } else {
+                destNote = " -> destino sem imagem carregada (memoria privada/shellcode)";
+            }
+        } else {
+            destNote = " -> destino nao resolvido";
+        }
+
         char addrBuf[32];
         snprintf(addrBuf, sizeof(addrBuf), "0x%016llX", (unsigned long long)remoteFunc);
         std::string detail = std::string(t.func) + " in " + WideToUtf8(std::wstring(t.dll)) +
-                             " patched with " + patternDesc + " at " + addrBuf;
-        AddStreamModFinding(out, "DWM_HOOK", "dwm.exe", std::string(t.func), detail, "HIGH");
+                             " patched with " + patternDesc + " at " + addrBuf + destNote;
+        AddStreamModFinding(out, "DWM_HOOK", "dwm.exe", std::string(t.func), detail, sev);
     }
 }
 
@@ -478,8 +548,6 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
             // all user-mode system DLLs. Any non-Windows DLL in DWM = injection.
             if (IsSystemModulePath(mod.path)) continue;
 
-            // Content-based annotation (does not affect whether we flag — all non-Windows
-            // DLLs in DWM are suspicious by definition).
             BYTE hdr[4096] = {}; SIZE_T hg = 0;
             ReadProcessMemory(hProc, reinterpret_cast<LPCVOID>(mod.begin), hdr, sizeof(hdr), &hg);
             bool hasGfxExports = DetectionFilter::ExportsGraphicsSymbol(hdr, hg, mod.begin);
@@ -491,8 +559,17 @@ static void ScanDwmIntegrity(std::vector<ScannerUI::StreamModFinding>& out) {
             if (!isSigned)
                 detail += " | NAO assinada";
 
+            std::string sev;
+            if (!isSigned) {
+                sev = "HIGH";       // DLL nao assinada no compositor - sinal mais forte
+            } else if (hasGfxExports) {
+                sev = "MEDIUM";     // assinada mas exporta simbolos graficos - hook de composicao plausivel
+            } else {
+                sev = "FLAG";       // assinada, sem forma de hook grafico (patcher/ferramenta de acessibilidade)
+            }
+
             AddStreamModFinding(out, "DWM_INJECT", "dwm.exe",
-                WideToUtf8(mod.path), detail, "HIGH");
+                WideToUtf8(mod.path), detail, sev);
         }
         // M4: inline hook detection
         ScanDwmInlineHooks(hProc, modules, out);
@@ -565,6 +642,30 @@ static bool IsWhitelistedOverlayProcess(const std::wstring& nameUp) {
     return false;
 }
 
+// Legitimate screen-capture/desktop-customization tools that legitimately create
+// topmost/layered/transparent windows. Unlike IsWhitelistedOverlayProcess (an
+// unconditional skip), this list only exempts when the process is ALSO signed —
+// name alone is not a trust signal — so an unsigned/portable build still surfaces
+// at a low severity instead of being fully hidden.
+static bool IsKnownDesktopOverlayToolProcess(const std::wstring& nameUp) {
+    static const wchar_t* kList[] = {
+        L"GREENSHOT.EXE",
+        L"SHAREX.EXE",
+        L"SNAGITEDITOR.EXE", L"SNAGIT32.EXE", L"SNAGITCAPTURE.EXE",
+        L"RAINMETER.EXE",
+        L"POWERTOYS.EXE", L"POWERTOYS.COLORPICKERUI.EXE",
+        L"POWERTOYS.FANCYZONESEDITOR.EXE", L"POWERTOYS.MEASURETOOLUI.EXE",
+        L"POWERTOYS.PEEK.UI.EXE",
+        L"ICUE.EXE",
+        L"LGHUB.EXE", L"LGHUB_AGENT.EXE",
+        L"RAZERCENTRALSERVICE.EXE", L"RZSYNAPSE.EXE",
+        L"RAZERCORTEX.EXE", L"RAZERAPPENGINE.EXE"
+    };
+    for (const auto* w : kList)
+        if (nameUp == w) return true;
+    return false;
+}
+
 struct OverlayScanCtx { std::vector<ScannerUI::StreamModFinding>* out; };
 
 static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
@@ -597,6 +698,9 @@ static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
 
     bool signed_ = !procPath.empty() && IsAuthenticodeSigned(procPath);
 
+    bool knownDesktopTool = IsKnownDesktopOverlayToolProcess(procName);
+    if (knownDesktopTool && signed_) return TRUE; // vendor-verified build of a known benign tool
+
     // M7: semi-transparent signed process = too common to flag
     if (semiTransparent && signed_) return TRUE;
 
@@ -615,6 +719,9 @@ static BOOL CALLBACK OverlayScanProc(HWND hWnd, LPARAM lParam) {
     // Severity: fully invisible unsigned = MEDIUM, fully invisible signed = FLAG
     //           semi-transparent unsigned = FLAG
     std::string sev = (fullyInvisible && !signed_) ? "MEDIUM" : "FLAG";
+    // Known desktop/capture tool but unsigned (e.g. portable ShareX/Rainmeter build) —
+    // still visible, but never above the lowest severity tier.
+    if (knownDesktopTool && !signed_) sev = "FLAG";
 
     auto* ctx = reinterpret_cast<OverlayScanCtx*>(lParam);
     AddStreamModFinding(*ctx->out,

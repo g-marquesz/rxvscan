@@ -26,6 +26,42 @@ static void AddGenericBypassFinding(std::vector<ScannerUI::GenericBypassFinding>
     out.push_back(finding);
 }
 
+// Richer overload carrying rule/confidence/evidence metadata for detectors that classify
+// destinations by trust tier (signed vs unsigned vs unresolved) rather than a flat severity.
+static void AddGenericBypassFinding(std::vector<ScannerUI::GenericBypassFinding>& out,
+                                    const std::string& type,
+                                    const std::string& process,
+                                    const std::string& target,
+                                    const std::string& detail,
+                                    const std::string& severity,
+                                    const std::string& ruleId,
+                                    const std::string& confidence,
+                                    const std::string& evidenceState,
+                                    const std::string& source = "scanner_generic_bypass",
+                                    const FILETIME* eventTime = nullptr) {
+    if (out.size() >= ScanLimits::kMaxBypassFindings)
+        return;
+
+    FILETIME nowFt = {};
+    if (eventTime)
+        nowFt = *eventTime;
+    else
+        GetSystemTimeAsFileTime(&nowFt);
+
+    ScannerUI::GenericBypassFinding finding;
+    FileTimeToLocalStrings(nowFt, finding.date, finding.time);
+    finding.type = type;
+    finding.process = process;
+    finding.target = target;
+    finding.detail = detail;
+    finding.severity = severity;
+    finding.ruleId = ruleId;
+    finding.confidence = confidence;
+    finding.evidenceState = evidenceState;
+    finding.source = source;
+    out.push_back(finding);
+}
+
 static bool HasSuspiciousProcessWriteAccess(DWORD access) {
     constexpr DWORD suspicious =
         PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD |
@@ -50,27 +86,15 @@ static void CollectHdPlayerExternalHandles(std::vector<ScannerUI::GenericBypassF
     if (targetPids.empty())
         return;
 
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    auto querySystem = ntdll ? reinterpret_cast<NtQuerySystemInformationFn>(
-        GetProcAddress(ntdll, "NtQuerySystemInformation")) : nullptr;
-    if (!querySystem)
+    const SystemHandleSnapshot& handleSnapshot = GetSystemHandleSnapshot();
+    if (!handleSnapshot.ok)
         return;
 
-    ULONG size = 1 << 20;
-    std::vector<BYTE> buffer(size);
-    ULONG needed = 0;
-    LONG status = querySystem(64, buffer.data(), size, &needed);
-    while (status == (LONG)0xC0000004L || status == (LONG)0xC0000023L) {
-        size = needed > size ? needed + (1 << 16) : size * 2;
-        buffer.assign(size, 0);
-        status = querySystem(64, buffer.data(), size, &needed);
-    }
-    if (status < 0)
-        return;
-
-    auto* info = reinterpret_cast<SystemHandleInformationEx*>(buffer.data());
+    const auto* info = handleSnapshot.Info();
     std::unordered_set<std::string> seen;
+    size_t paceCounter = 0;
     for (ULONG_PTR i = 0; i < info->NumberOfHandles && out.size() < 160; ++i) {
+        MaybePaceIteration(paceCounter, 4096);
         const auto& handle = info->Handles[i];
         DWORD sourcePid = (DWORD)handle.UniqueProcessId;
         if (sourcePid == GetCurrentProcessId() || !HasSuspiciousProcessWriteAccess(handle.GrantedAccess))
@@ -132,28 +156,75 @@ static std::wstring ExpandEnvPathW(const std::wstring& value) {
     return expanded;
 }
 
-static bool IsBroadOrWritableAvExclusion(const std::wstring& rawPath) {
-    std::wstring expanded = ExpandEnvPathW(rawPath);
-    std::wstring up = ToUpperInvariant(expanded);
-    if (up.empty())
-        return false;
+static bool IsWildcardOrRootAvExclusion(const std::wstring& up) {
+    return up.find(L"*") != std::wstring::npos || up == L"C:\\" || up == L"C:" ||
+           up == L"\\" || up == L"%SYSTEMDRIVE%\\" || up == L"%SYSTEMDRIVE%";
+}
 
-    if (up.find(L"*") != std::wstring::npos || up == L"C:\\" || up == L"C:" ||
-        up == L"\\" || up == L"%SYSTEMDRIVE%\\" || up == L"%SYSTEMDRIVE%")
-        return true;
-
+static bool IsWritablePathTokenAvExclusion(const std::wstring& up) {
     static const wchar_t* riskyTokens[] = {
         L"\\USERS\\", L"\\APPDATA\\", L"\\TEMP", L"\\TMP",
         L"\\DOWNLOADS", L"\\DESKTOP", L"\\PROGRAMDATA\\",
         L"\\PUBLIC\\", L"\\DOCUMENTS", nullptr
     };
-    for (const wchar_t** token = riskyTokens; *token; ++token) {
-        if (up.find(*token) != std::wstring::npos)
-            return true;
-    }
+    for (const wchar_t** token = riskyTokens; *token; ++token)
+        if (up.find(*token) != std::wstring::npos) return true;
+    return false;
+}
 
+// Samples up to kMaxSample .exe files directly under `dir` (and its \bin, \x64, \x86
+// subfolders, if present) and returns true as soon as one is genuinely Authenticode/
+// catalog signed (reuses IsTrustedSignedCached — real WinVerifyTrust chain validation,
+// not a name/path heuristic). This excuses the EXCLUSION as pointing at a currently
+// installed, verifiably-signed piece of software; it does not excuse any other
+// individual unsigned file that may also live in that folder (those remain subject to
+// every other scanner in the codebase).
+static bool DirectoryHasTrustedSignedExecutable(const std::wstring& dir) {
+    static const wchar_t* kSubdirs[] = { L"", L"\\bin", L"\\x64", L"\\x86", nullptr };
+    constexpr int kMaxSample = 40;
+    int sampled = 0;
+    for (int si = 0; kSubdirs[si] && sampled < kMaxSample; ++si) {
+        std::wstring probeDir = dir + kSubdirs[si];
+        WIN32_FIND_DATAW fd = {};
+        HANDLE h = FindFirstFileW((probeDir + L"\\*.exe").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (++sampled > kMaxSample) break;
+            if (DetectionFilter::IsTrustedSignedCached(probeDir + L"\\" + fd.cFileName)) {
+                FindClose(h);
+                return true;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return false;
+}
+
+enum class AvExclusionRisk {
+    BroadOrRoot, WritableUnsigned, WritableSignedVendor,
+    OtherUnsigned, OtherSignedVendor, Nonexistent
+};
+
+static AvExclusionRisk ClassifyAvExclusionTarget(const std::wstring& rawPath, std::wstring& expandedOut) {
+    std::wstring expanded = ExpandEnvPathW(rawPath);
+    expandedOut = expanded;
+    std::wstring up = ToUpperInvariant(expanded);
+    if (up.empty() || IsWildcardOrRootAvExclusion(up))
+        return AvExclusionRisk::BroadOrRoot;
+
+    bool writable = IsWritablePathTokenAvExclusion(up);
     DWORD attrs = GetFileAttributesW(expanded.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return AvExclusionRisk::Nonexistent;
+
+    bool hasTrustedContent = (attrs & FILE_ATTRIBUTE_DIRECTORY)
+        ? DirectoryHasTrustedSignedExecutable(expanded)
+        : DetectionFilter::IsTrustedSignedCached(expanded);
+
+    if (writable)
+        return hasTrustedContent ? AvExclusionRisk::WritableSignedVendor : AvExclusionRisk::WritableUnsigned;
+    return hasTrustedContent ? AvExclusionRisk::OtherSignedVendor : AvExclusionRisk::OtherUnsigned;
 }
 
 static std::wstring RegValueToPathString(const wchar_t* valueName, DWORD type,
@@ -209,7 +280,8 @@ static void CollectDefenderPathExclusionsFromKey(
         if (!seen.insert(key).second)
             continue;
 
-        bool risky = IsBroadOrWritableAvExclusion(raw);
+        std::wstring expandedForClass;
+        AvExclusionRisk risk = ClassifyAvExclusionTarget(raw, expandedForClass);
         std::string target = WideToUtf8(expanded.empty() ? raw : expanded);
         std::string detail = std::string("Microsoft Defender path exclusion detected")
             + " | source=" + source
@@ -217,8 +289,39 @@ static void CollectDefenderPathExclusionsFromKey(
         if (expanded != raw)
             detail += " | raw=" + WideToUtf8(raw);
 
+        std::string sev, conf, evState, ruleId;
+        switch (risk) {
+        case AvExclusionRisk::BroadOrRoot:
+            sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+            ruleId = "AV.EXCLUSION.WILDCARD_OR_ROOT";
+            break;
+        case AvExclusionRisk::WritableUnsigned:
+            sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+            ruleId = "AV.EXCLUSION.WRITABLE_PATH_UNVERIFIED";
+            break;
+        case AvExclusionRisk::WritableSignedVendor:
+            sev = "MEDIUM"; conf = "MEDIUM"; evState = "TRUSTED_THIRD_PARTY";
+            ruleId = "AV.EXCLUSION.WRITABLE_PATH_SIGNED_VENDOR";
+            detail += " | conteudo assinado encontrado - ainda em pasta gravavel pelo usuario";
+            break;
+        case AvExclusionRisk::OtherUnsigned:
+            sev = "MEDIUM"; conf = "MEDIUM"; evState = "REVIEW";
+            ruleId = "AV.EXCLUSION.PATH_UNVERIFIED";
+            break;
+        case AvExclusionRisk::OtherSignedVendor:
+            sev = "FLAG"; conf = "HIGH"; evState = "TRUSTED_THIRD_PARTY";
+            ruleId = "AV.EXCLUSION.PATH_SIGNED_VENDOR";
+            detail += " | conteudo assinado verificado (provavel software legitimo)";
+            break;
+        case AvExclusionRisk::Nonexistent:
+            sev = "MEDIUM"; conf = "LOW"; evState = "INCONCLUSIVE";
+            ruleId = "AV.EXCLUSION.PATH_NOT_FOUND";
+            detail += " | caminho nao existe atualmente (regra obsoleta ou pre-configurada)";
+            break;
+        }
+
         AddGenericBypassFinding(out, ScanTag::AvExclusion, "Microsoft Defender",
-                                target, detail, risky ? "HIGH" : "MEDIUM");
+                                target, detail, sev, ruleId, conf, evState);
     }
 
     RegCloseKey(hKey);
@@ -383,12 +486,71 @@ static bool IsJmpHookPattern(const BYTE* b, size_t len) {
 // Content-based check: does this remote module export any graphics API symbol?
 // Reads the first 4096 bytes of the module and parses its export directory.
 // NO name/path check — cheats can use any name or path.
-static bool IsGraphicsHookCandidate(HANDLE process, uintptr_t moduleBase) {
-    BYTE header[4096] = {};
-    SIZE_T got = 0;
-    if (!ReadProcessMemory(process, (LPCVOID)moduleBase, header, sizeof(header), &got) || got < 0x40)
-        return false;
-    return DetectionFilter::ExportsGraphicsSymbol(header, got, moduleBase);
+// ─── Hook-destination trust classification ────────────────────────────────────
+// Shared trust tiering used by CollectGraphicsHookFindings and ScanDxgiVtableIntegrity
+// (ScanIatHooks calls DetectionFilter::ResolveModuleTrustAtAddress directly since it has
+// no "does the destination itself export a graphics symbol" concept). A destination is
+// only ever fully suppressed (LayeredTrustedGfx) when it lands back in the same module,
+// or in a module that is BOTH signed AND itself exports a graphics symbol — otherwise it
+// is still reported, just at a severity/confidence reflecting the partial trust evidence.
+enum class HookDestTrust { LayeredTrustedGfx, SignedNonGfx, Unsigned, Unresolved };
+
+struct HookDestVerdict {
+    HookDestTrust trust = HookDestTrust::Unresolved;
+    std::wstring  resolvedPath;
+};
+
+static HookDestVerdict ClassifyHookDestination(HANDLE process, uintptr_t destAddr,
+                                               const std::vector<ModuleRange>& modules,
+                                               const std::wstring& sourceModulePath) {
+    HookDestVerdict v;
+    for (const auto& m : modules) {
+        if (destAddr < m.begin || destAddr >= m.end) continue;
+        v.resolvedPath = m.path;
+        if (!sourceModulePath.empty() && m.path == sourceModulePath) {
+            v.trust = HookDestTrust::LayeredTrustedGfx;  // self-referential thunk
+            return v;
+        }
+        if (DetectionFilter::IsTrustedSignedCached(m.path)) {
+            BYTE dh[4096] = {}; SIZE_T dg = 0;
+            ReadProcessMemory(process, (LPCVOID)m.begin, dh, sizeof(dh), &dg);
+            v.trust = DetectionFilter::ExportsGraphicsSymbol(dh, dg, m.begin)
+                      ? HookDestTrust::LayeredTrustedGfx : HookDestTrust::SignedNonGfx;
+        } else {
+            v.trust = HookDestTrust::Unsigned;
+        }
+        return v;
+    }
+    // Not in the (possibly stale) module snapshot — resolve live.
+    auto resolved = DetectionFilter::ResolveModuleTrustAtAddress(process, destAddr);
+    v.resolvedPath = resolved.path;
+    if (!resolved.resolved) { v.trust = HookDestTrust::Unresolved; return v; }
+    if (!resolved.signedTrusted) { v.trust = HookDestTrust::Unsigned; return v; }
+    v.trust = resolved.exportsGraphics ? HookDestTrust::LayeredTrustedGfx : HookDestTrust::SignedNonGfx;
+    return v;
+}
+
+// Maps a trust tier to (severity, ruleId, confidence, evidenceState). Callers must skip
+// emission entirely on LayeredTrustedGfx — the only tier backed by both cryptographic
+// trust AND content evidence.
+static void SeverityForHookDest(HookDestTrust t, const char* ruleFamily,
+                                std::string& sev, std::string& ruleId,
+                                std::string& conf, std::string& evState) {
+    switch (t) {
+    case HookDestTrust::SignedNonGfx:
+        sev = "FLAG"; conf = "MEDIUM"; evState = "TRUSTED_THIRD_PARTY";
+        ruleId = std::string(ruleFamily) + ".SIGNED_NONGFX_DEST";
+        break;
+    case HookDestTrust::Unsigned:
+        sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+        ruleId = std::string(ruleFamily) + ".UNSIGNED_DEST";
+        break;
+    case HookDestTrust::Unresolved:
+    default:
+        sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+        ruleId = std::string(ruleFamily) + ".ANON_DEST";
+        break;
+    }
 }
 
 // ─── Graphics hook destination collector ─────────────────────────────────────
@@ -402,16 +564,19 @@ std::unordered_set<uintptr_t> CollectGfxHookDestBases(HANDLE process,
 
     static const char* kGfxFuncs[] = {
         "wglSwapBuffers", "glDrawElements", "glDrawArrays", "glDepthFunc",
-        "eglSwapBuffers", "SwapBuffers", "D3D11CreateDevice",
+        "glDrawRangeElements", "glBindTexture", "glUseProgram", "glUniform4f",
+        "glUniform4fv", "glEnable", "glDisable", "glBlendFunc", "glStencilFunc",
+        "glPolygonMode", "eglSwapBuffers", "eglMakeCurrent", "eglGetProcAddress",
+        "SwapBuffers", "D3D11CreateDevice",
         "D3D11CreateDeviceAndSwapChain", "CreateDXGIFactory",
         "CreateDXGIFactory1", "CreateDXGIFactory2",
-        "vkQueuePresentKHR", "wglGetProcAddress", "glGetProcAddress",
+        "vkQueuePresentKHR", "vkCmdDraw", "vkCmdDrawIndexed",
+        "vkCreateGraphicsPipelines", "wglGetProcAddress", "glGetProcAddress",
         nullptr
     };
 
     for (const auto& module : modules) {
         if (module.path.empty()) continue;
-        if (!IsGraphicsHookCandidate(process, module.begin)) continue;
 
         BYTE hdr[4096] = {};
         SIZE_T hg = 0;
@@ -529,7 +694,6 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
         for (const auto& module : modules) {
             if (gfxCount >= ScanLimits::kMaxGfxHookFindings) break;
             if (module.path.empty()) continue;
-            if (!IsGraphicsHookCandidate(process, module.begin)) continue;
 
             std::wstring modName = BaseNameFromPath(module.path);
             bool modSigned = DetectionFilter::IsTrustedSignedCached(module.path);
@@ -580,10 +744,14 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
 
             static const char* kGfxFuncs[] = {
                 "wglSwapBuffers", "glDrawElements", "glDrawArrays", "glDepthFunc",
-                "eglSwapBuffers", "SwapBuffers", "D3D11CreateDevice",
+                "glDrawRangeElements", "glBindTexture", "glUseProgram", "glUniform4f",
+                "glUniform4fv", "glEnable", "glDisable", "glBlendFunc", "glStencilFunc",
+                "glPolygonMode", "eglSwapBuffers", "eglMakeCurrent", "eglGetProcAddress",
+                "SwapBuffers", "D3D11CreateDevice",
                 "D3D11CreateDeviceAndSwapChain", "CreateDXGIFactory",
                 "CreateDXGIFactory1", "CreateDXGIFactory2",
-                "vkQueuePresentKHR", "wglGetProcAddress", "glGetProcAddress",
+                "vkQueuePresentKHR", "vkCmdDraw", "vkCmdDrawIndexed",
+                "vkCreateGraphicsPipelines", "wglGetProcAddress", "glGetProcAddress",
                 nullptr
             };
 
@@ -614,36 +782,26 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
 
                 uintptr_t chainEnd = FollowJmpChain(process, funcAddr);
 
-                // Allow chain that ends in a signed module which itself exports graphics symbols
-                bool legitimateLayering = false;
-                for (const auto& m : modules) {
-                    if (chainEnd >= m.begin && chainEnd < m.end) {
-                        if (m.path == module.path) { legitimateLayering = true; break; }
-                        if (DetectionFilter::IsTrustedSignedCached(m.path)) {
-                            BYTE dh[4096] = {}; SIZE_T dg = 0;
-                            ReadProcessMemory(process, (LPCVOID)m.begin, dh, sizeof(dh), &dg);
-                            if (DetectionFilter::ExportsGraphicsSymbol(dh, dg, m.begin))
-                                legitimateLayering = true;
-                        }
-                        break;
-                    }
-                }
-                if (legitimateLayering) continue;
-
-                MEMORY_BASIC_INFORMATION mbi = {};
-                bool shellcode = false;
-                if (VirtualQueryEx(process, (LPCVOID)chainEnd, &mbi, sizeof(mbi)) == sizeof(mbi))
-                    shellcode = (mbi.Type == MEM_PRIVATE) && !IsAddrInModules(chainEnd, modules);
+                HookDestVerdict destV = ClassifyHookDestination(process, chainEnd, modules, module.path);
+                if (destV.trust == HookDestTrust::LayeredTrustedGfx) continue; // legitimate layering
 
                 char funcBuf[32], chainBuf[32];
                 snprintf(funcBuf,  sizeof(funcBuf),  "0x%llX", (unsigned long long)funcAddr);
                 snprintf(chainBuf, sizeof(chainBuf), "0x%llX", (unsigned long long)chainEnd);
 
+                std::string sev, ruleId, conf, evState;
+                SeverityForHookDest(destV.trust, "GFX.HOOK", sev, ruleId, conf, evState);
+
                 std::string detail = "hook em funcao grafica: " + std::string(fnName) +
                                      " | modulo=" + WideToUtf8(modName) +
                                      " | signed=" + (modSigned ? "yes" : "no") +
                                      " | func=" + funcBuf + " -> chain_end=" + chainBuf +
-                                     (shellcode ? " | SHELLCODE em memoria anonima" : " | redireciona fora do modulo");
+                                     " | destino=" + (destV.trust == HookDestTrust::Unresolved
+                                          ? "memoria anonima/sem arquivo mapeado"
+                                          : WideToUtf8(destV.resolvedPath) +
+                                            (destV.trust == HookDestTrust::SignedNonGfx
+                                             ? " (assinado, sem exports graficos - possivel shim de overlay/captura)"
+                                             : " (nao assinado)"));
                 // Diagnostic annotation (informational only — not a trust signal)
                 if (DetectionFilter::IsNamedLikeGraphicsRuntime(modName))
                     detail += " | nota: nome similar a runtime grafico";
@@ -651,7 +809,7 @@ static void CollectGraphicsHookFindings(std::vector<ScannerUI::GenericBypassFind
                     detail += " | nota: nome similar a overlay";
 
                 AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                        WideToUtf8(module.path), detail, "HIGH");
+                                        WideToUtf8(module.path), detail, sev, ruleId, conf, evState);
                 ++gfxCount;
             }
         }
@@ -821,7 +979,8 @@ static void ScanNtdllStubIntegrity(std::vector<ScannerUI::GenericBypassFinding>&
                                  " | disk=[" + diskHex + "] mem=[" + memHex + "]" +
                                  " | rva=0x" + rvaStr.str() +
                                  " | chain_end=" + tgtBuf;
-            AddGenericBypassFinding(out, ScanTag::ThreadProtect, "ntdll.dll", std::string(fnName), detail, "HIGH");
+            AddGenericBypassFinding(out, ScanTag::ThreadProtect, "ntdll.dll", std::string(fnName), detail,
+                                    "HIGH", "NTDLL.HOOK.UNSIGNED_OR_UNRESOLVED_DEST", "HIGH", "SUSPICIOUS");
             ++hookCount;
         }
         skip_ntdll_hook:;
@@ -932,6 +1091,13 @@ static void ScanIatHooks(std::vector<ScannerUI::GenericBypassFinding>& out) {
                                               : *reinterpret_cast<const uint32_t*>(iatBuf);
                     if (resolved == 0 || IsAddrInModules(resolved, modules)) continue;
 
+                    // Outside the (possibly stale) module snapshot — resolve live before deciding
+                    // trust. A late-loaded or manually-mapped-but-signed DLL is common for
+                    // legitimate overlay/anti-cheat/RGB software hooking exactly these APIs
+                    // (CreateRemoteThread, VirtualAlloc*, WriteProcessMemory...); "outside the
+                    // snapshot" alone is not equivalent to shellcode.
+                    auto destTrust = DetectionFilter::ResolveModuleTrustAtAddress(process, resolved);
+
                     std::string key = std::to_string(pid) + ":" + std::to_string(module.begin) + ":" + std::to_string(ei);
                     if (!seenIat.insert(key).second) continue;
 
@@ -939,9 +1105,24 @@ static void ScanIatHooks(std::vector<ScannerUI::GenericBypassFinding>& out) {
                     snprintf(addrBuf, sizeof(addrBuf), "0x%llX", (unsigned long long)resolved);
                     std::string detail = "IAT hook: " + std::string(importName) +
                                          " em " + WideToUtf8(BaseNameFromPath(module.path)) +
-                                         " -> addr anonimo " + addrBuf;
+                                         " -> addr " + addrBuf;
+
+                    std::string sev, conf, evState, ruleId;
+                    if (destTrust.resolved && destTrust.signedTrusted) {
+                        sev = "FLAG"; conf = "MEDIUM"; evState = "TRUSTED_THIRD_PARTY";
+                        ruleId = "GFX.IAT.SIGNED_UNLISTED_DEST";
+                        detail += " | destino assinado, fora do snapshot de modulos: " + WideToUtf8(destTrust.path);
+                    } else if (destTrust.resolved) {
+                        sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+                        ruleId = "GFX.IAT.UNSIGNED_DEST";
+                        detail += " | destino NAO assinado: " + WideToUtf8(destTrust.path);
+                    } else {
+                        sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+                        ruleId = "GFX.IAT.ANON_DEST";
+                        detail += " | destino em memoria anonima (sem arquivo mapeado)";
+                    }
                     AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                           WideToUtf8(module.path), detail, "HIGH");
+                                           WideToUtf8(module.path), detail, sev, ruleId, conf, evState);
                 }
             }
         }
@@ -1096,19 +1277,15 @@ static void ScanDxgiVtableIntegrity(std::vector<ScannerUI::GenericBypassFinding>
                         if (ptr < 0x10000) continue;
                         if (ptr >= module.begin && ptr < module.end) continue;
 
-                        bool inSignedMod = false;
-                        for (const auto& m : modules) {
-                            if (ptr >= m.begin && ptr < m.end) {
-                                if (DetectionFilter::IsTrustedSignedCached(m.path))
-                                    inSignedMod = true;
-                                break;
-                            }
-                        }
-                        if (inSignedMod) continue;
-
                         MEMORY_BASIC_INFORMATION mbi = {};
                         if (VirtualQueryEx(process, (LPCVOID)ptr, &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
                         if (mbi.State != MEM_COMMIT || !IsExecProtect(mbi.Protect)) continue;
+
+                        HookDestVerdict destV = ClassifyHookDestination(process, ptr, modules, module.path);
+                        if (destV.trust == HookDestTrust::LayeredTrustedGfx) continue;
+
+                        std::string sev, ruleId, conf, evState;
+                        SeverityForHookDest(destV.trust, "GFX.VTABLE", sev, ruleId, conf, evState);
 
                         char entryBuf[32], tgtBuf[32];
                         snprintf(entryBuf, sizeof(entryBuf), "0x%llX", (unsigned long long)(secBase + off + pos));
@@ -1116,9 +1293,12 @@ static void ScanDxgiVtableIntegrity(std::vector<ScannerUI::GenericBypassFinding>
                         std::string detail = "VTable/RDATA pointer redireciona fora do modulo: " +
                                              WideToUtf8(BaseNameFromPath(module.path)) +
                                              " | entry=" + entryBuf + " -> " + tgtBuf +
-                                             " | mem=" + (mbi.Type == MEM_PRIVATE ? "anonima" : "mapeada");
+                                             " | mem=" + (mbi.Type == MEM_PRIVATE ? "anonima" : "mapeada") +
+                                             (destV.trust == HookDestTrust::SignedNonGfx
+                                              ? " | destino assinado sem exports graficos: " + WideToUtf8(destV.resolvedPath)
+                                              : "");
                         AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                               WideToUtf8(module.path), detail, "HIGH");
+                                               WideToUtf8(module.path), detail, sev, ruleId, conf, evState);
                         ++vtCount;
                         foundInChunk = true;
                     }
@@ -1226,13 +1406,15 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
             // outside trusted roots (System32/Program Files). Two signed
             // copies in trusted dirs (rare WinSxS redirect) → skip.
             if (kv.second.size() > 1) {
-                bool suspect = false;
+                bool anyUnsigned = false;
+                bool anySignedUntrustedDir = false;
                 for (const auto* m : kv.second) {
                     bool sgn = DetectionFilter::IsTrustedSignedCached(m->path);
                     auto cls = DetectionFilter::ClassifyPath(m->path);
-                    if (!sgn || !DetectionFilter::IsTrustedDir(cls)) { suspect = true; break; }
+                    if (!sgn) anyUnsigned = true;
+                    else if (!DetectionFilter::IsTrustedDir(cls)) anySignedUntrustedDir = true;
                 }
-                if (!suspect) continue;
+                if (!anyUnsigned && !anySignedUntrustedDir) continue;
 
                 std::string paths;
                 for (size_t i = 0; i < kv.second.size(); ++i) {
@@ -1242,8 +1424,13 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
                 std::string detail = "DLL do Windows duplicada: " + WideToUtf8(upName) +
                                      " carregada " + std::to_string(kv.second.size()) +
                                      "x | paths=" + paths;
+                std::string sev     = anyUnsigned ? "HIGH"       : "MEDIUM";
+                std::string conf    = anyUnsigned ? "HIGH"       : "MEDIUM";
+                std::string evState = anyUnsigned ? "SUSPICIOUS" : "REVIEW";
+                std::string ruleId  = anyUnsigned ? "GFX.DUPLICATE.MULTILOAD_UNSIGNED"
+                                                   : "GFX.DUPLICATE.MULTILOAD_SIGNED_UNTRUSTED_DIR";
                 AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                        WideToUtf8(upName), detail, "HIGH");
+                                        WideToUtf8(upName), detail, sev, ruleId, conf, evState);
                 if (out.size() >= ScanLimits::kMaxBypassFindings) break;
                 continue;
             }
@@ -1269,22 +1456,32 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
                                      WideToUtf8(upName) +
                                      " | path=" + WideToUtf8(m->path) +
                                      (sideBySide ? " | lado-a-lado com o exe" : "");
-                AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                        WideToUtf8(m->path), detail, "HIGH");
+                AddGenericBypassFinding(out, ScanTag::GfxHook, procPath, WideToUtf8(m->path), detail,
+                                        "HIGH", "GFX.DUPLICATE.BUNDLED_UNSIGNED", "HIGH", "SUSPICIOUS");
                 if (out.size() >= ScanLimits::kMaxBypassFindings) break;
                 continue;
             }
 
-            // STRICT list policy: ANY copy outside System32/SysWOW64/WinSxS
-            // is suspect. HIGH if side-by-side or unsigned; MEDIUM otherwise.
+            // STRICT list policy: any copy outside System32/SysWOW64/WinSxS is suspect.
+            //   - Unsigned                                      -> HIGH  (real hijack risk)
+            //   - Signed + side-by-side + SAME publisher as exe  -> already exempted above (samePub)
+            //   - Signed + side-by-side + DIFFERENT publisher    -> MEDIUM (plausible legit
+            //         third-party DLL-proxy tool; still a genuine hijack technique, so not
+            //         downgraded further even though signed)
+            //   - Signed, NOT side-by-side                       -> MEDIUM
             std::string detail = std::string("DLL do Windows fora do System32 (search-order hijack): ") +
                                  WideToUtf8(upName) +
                                  " | path=" + WideToUtf8(m->path) +
                                  " | signed=" + (signedMod ? "yes" : "no") +
                                  (sideBySide ? " | LADO A LADO COM O EXE (DLL hijack)" : "");
-            std::string sev = (sideBySide || !signedMod) ? "HIGH" : "MEDIUM";
+            std::string sev     = !signedMod ? "HIGH" : "MEDIUM";
+            std::string conf    = !signedMod ? "HIGH" : "MEDIUM";
+            std::string evState = !signedMod ? "SUSPICIOUS" : "REVIEW";
+            std::string ruleId  = !signedMod ? "GFX.DUPLICATE.STRICT_UNSIGNED"
+                                 : (sideBySide ? "GFX.DUPLICATE.STRICT_SIGNED_THIRDPARTY_SIDEBYSIDE"
+                                                : "GFX.DUPLICATE.STRICT_SIGNED_ELSEWHERE");
             AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                    WideToUtf8(m->path), detail, sev);
+                                    WideToUtf8(m->path), detail, sev, ruleId, conf, evState);
             if (out.size() >= ScanLimits::kMaxBypassFindings) break;
         }
 
@@ -1315,9 +1512,12 @@ static void ScanDuplicateGraphicsModules(std::vector<ScannerUI::GenericBypassFin
                                      WideToUtf8(kStrictGfxDlls[i]) +
                                      " | path=" + WideToUtf8(candidate) +
                                      " | signed=" + (signedFile ? "yes" : "no");
+                std::string sev     = signedFile ? "MEDIUM" : "HIGH";
+                std::string conf    = signedFile ? "MEDIUM" : "HIGH";
+                std::string evState = signedFile ? "REVIEW" : "SUSPICIOUS";
+                std::string ruleId  = signedFile ? "GFX.DUPLICATE.STAGED_SIGNED" : "GFX.DUPLICATE.STAGED_UNSIGNED";
                 AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                        WideToUtf8(candidate), detail,
-                                        signedFile ? "MEDIUM" : "HIGH");
+                                        WideToUtf8(candidate), detail, sev, ruleId, conf, evState);
             }
         }
 
@@ -1472,6 +1672,15 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
         std::vector<ModuleRange> modules;
         if (!CollectProcessModules(process, modules)) { CloseHandle(process); continue; }
 
+        // Cross-reference: if this exact allocation is ALSO a confirmed JMP-hook destination
+        // on a graphics API export (same collector wired into scanner_processes.cpp's
+        // injection scanners), the string-based classification below is corroborated by an
+        // independent structural signal and can stay at full severity. Without corroboration,
+        // string-only matches are downgraded: legitimate DLL-injection overlay tools resolve
+        // gl*/wgl*/d3d* symbols by name from a small anonymous stub by design — this looks
+        // identical to a cheat loader on strings alone.
+        auto gfxHookDests = CollectGfxHookDestBases(process, modules);
+
         bool chromium = ProcessHostsChromiumRuntime(modules);
         // Chromium-host processes raise the bar: still require loaderEvidence
         // AND at least 3 distinct function needles to flag.
@@ -1531,6 +1740,7 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
                         bool flagMed  = !s.jitEvidence && !s.loaderEvidence &&
                                         s.distinctNeedles >= kMinNeedlesWithoutLoader;
                         if (flagHigh || flagMed) {
+                            bool corroborated = !gfxHookDests.empty() && gfxHookDests.count(allocBase) > 0;
                             char addrBuf[32];
                             snprintf(addrBuf, sizeof(addrBuf), "0x%llX",
                                      (unsigned long long)(uintptr_t)mbi.BaseAddress);
@@ -1540,10 +1750,22 @@ static void ScanGraphicsStringsInAnonMemory(std::vector<ScannerUI::GenericBypass
                                 + " | size=" + std::to_string((unsigned long long)mbi.RegionSize)
                                 + " | loader_dll=" + (s.loaderEvidence ? "yes" : "no")
                                 + " | funcs=" + std::to_string(s.distinctNeedles)
-                                + " | first=\"" + (s.firstMatch ? s.firstMatch : "?") + "\"";
+                                + " | first=\"" + (s.firstMatch ? s.firstMatch : "?") + "\""
+                                + (corroborated ? " | CONFIRMADO: destino de hook grafico" : "");
+
+                            std::string sev, conf, evState, ruleId;
+                            if (corroborated) {
+                                sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+                                ruleId = "GFX.ANONMEM.CONFIRMED_HOOK_DEST";
+                            } else if (flagHigh) {
+                                sev = "MEDIUM"; conf = "MEDIUM"; evState = "REVIEW";
+                                ruleId = "GFX.ANONMEM.LOADER_STRINGS_ONLY";
+                            } else {
+                                sev = "MEDIUM"; conf = "LOW"; evState = "INCONCLUSIVE";
+                                ruleId = "GFX.ANONMEM.NEEDLES_ONLY";
+                            }
                             AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                                    addrBuf, detail,
-                                                    flagHigh ? "HIGH" : "MEDIUM");
+                                                    addrBuf, detail, sev, ruleId, conf, evState);
                             ++reported;
                         }
                     }
@@ -1604,6 +1826,11 @@ static void ScanThreadsWithGraphicsContext(std::vector<ScannerUI::GenericBypassF
         std::string procPath = ProcessPathByPid(pid);
         std::vector<ModuleRange> modules;
         if (!CollectProcessModules(process, modules)) { CloseHandle(process); continue; }
+
+        // See ScanGraphicsStringsInAnonMemory for rationale: corroborate string-only
+        // classification against confirmed graphics-hook destinations before trusting it
+        // at full severity.
+        auto gfxHookDests = CollectGfxHookDestBases(process, modules);
 
         bool chromium = ProcessHostsChromiumRuntime(modules);
         const int kMinNeedlesWithLoader    = chromium ? 3 : 2;
@@ -1669,6 +1896,7 @@ static void ScanThreadsWithGraphicsContext(std::vector<ScannerUI::GenericBypassF
                                 s.distinctNeedles >= kMinNeedlesWithoutLoader;
                 if (!flagHigh && !flagMed) continue;
 
+                bool corroborated = !gfxHookDests.empty() && gfxHookDests.count(allocBase) > 0;
                 char addrBuf[32], startBuf[32];
                 snprintf(addrBuf,  sizeof(addrBuf),  "0x%llX", (unsigned long long)allocBase);
                 snprintf(startBuf, sizeof(startBuf), "0x%llX", (unsigned long long)startAddr);
@@ -1679,10 +1907,22 @@ static void ScanThreadsWithGraphicsContext(std::vector<ScannerUI::GenericBypassF
                     + " | region=" + addrBuf
                     + " | loader_dll=" + (s.loaderEvidence ? "yes" : "no")
                     + " | funcs=" + std::to_string(s.distinctNeedles)
-                    + " | first=\"" + (s.firstMatch ? s.firstMatch : "?") + "\"";
+                    + " | first=\"" + (s.firstMatch ? s.firstMatch : "?") + "\""
+                    + (corroborated ? " | CONFIRMADO: destino de hook grafico" : "");
+
+                std::string sev, conf, evState, ruleId;
+                if (corroborated) {
+                    sev = "HIGH"; conf = "HIGH"; evState = "SUSPICIOUS";
+                    ruleId = "GFX.ANONMEM.CONFIRMED_HOOK_DEST";
+                } else if (flagHigh) {
+                    sev = "MEDIUM"; conf = "MEDIUM"; evState = "REVIEW";
+                    ruleId = "GFX.ANONMEM.LOADER_STRINGS_ONLY";
+                } else {
+                    sev = "MEDIUM"; conf = "LOW"; evState = "INCONCLUSIVE";
+                    ruleId = "GFX.ANONMEM.NEEDLES_ONLY";
+                }
                 AddGenericBypassFinding(out, ScanTag::GfxHook, procPath,
-                                        startBuf, detail,
-                                        flagHigh ? "HIGH" : "MEDIUM");
+                                        startBuf, detail, sev, ruleId, conf, evState);
                 ++reported;
             } while (Thread32Next(snap, &te));
         }
@@ -2069,6 +2309,171 @@ static void CollectLspFindings(std::vector<ScannerUI::GenericBypassFinding>& out
     }
 }
 
+struct SysmonStructuralRecord {
+    ULONGLONG time = 0;
+    ULONGLONG recordId = 0;
+    FILETIME fileTime = {};
+    int eventId = 0;
+    std::wstring state;
+};
+
+static void CollectSysmonAvailabilityGaps(std::vector<ScannerUI::GenericBypassFinding>& out) {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+        return;
+
+    SC_HANDLE service = OpenServiceW(scm, L"Sysmon64", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+    if (!service)
+        service = OpenServiceW(scm, L"Sysmon", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+    if (!service) {
+        CloseServiceHandle(scm);
+        return;
+    }
+
+    SERVICE_STATUS_PROCESS serviceStatus = {};
+    DWORD needed = 0;
+    bool running = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                        reinterpret_cast<LPBYTE>(&serviceStatus),
+                                        sizeof(serviceStatus), &needed) &&
+                   serviceStatus.dwCurrentState == SERVICE_RUNNING;
+    if (!running) {
+        AddGenericBypassFinding(out, ScanTag::Sysmon, "Sysmon service",
+                                "Sysmon Operational",
+                                "gap de telemetria: servico do Sysmon existe, mas nao esta em execucao",
+                                "HIGH", "SYSMON.SERVICE_NOT_RUNNING", "HIGH", "SUSPICIOUS",
+                                "Service Control Manager");
+    }
+
+    DWORD configBytes = 0;
+    QueryServiceConfigW(service, nullptr, 0, &configBytes);
+    if (configBytes > 0) {
+        std::vector<BYTE> buffer(configBytes);
+        auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+        if (QueryServiceConfigW(service, config, configBytes, &configBytes) &&
+            config->dwStartType == SERVICE_DISABLED) {
+            AddGenericBypassFinding(out, ScanTag::Sysmon, "Sysmon service",
+                                    "Sysmon Operational",
+                                    "gap de telemetria: servico do Sysmon esta desabilitado",
+                                    "HIGH", "SYSMON.SERVICE_DISABLED", "HIGH", "SUSPICIOUS",
+                                    "Service Control Manager");
+        }
+    }
+
+    CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+}
+
+static bool SysmonStateContains(const std::wstring& state, const wchar_t* token) {
+    return ToUpperInvariant(state).find(token) != std::wstring::npos;
+}
+
+static void CollectSysmonStructuralGaps(std::vector<ScannerUI::GenericBypassFinding>& out) {
+    constexpr const wchar_t* kChannel = L"Microsoft-Windows-Sysmon/Operational";
+    EVT_HANDLE query = EvtQuery(nullptr, kChannel, L"*",
+                                EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!query)
+        return;
+
+    const ULONGLONG boot = FileTimeToU64(GetBootFileTime());
+    std::vector<SysmonStructuralRecord> records;
+    records.reserve(2048);
+    EVT_HANDLE events[32] = {};
+    DWORD returned = 0;
+    bool reachedBoot = false;
+
+    while (!reachedBoot && records.size() < 8192 &&
+           EvtNext(query, (DWORD)std::size(events), events,
+                   ScanLimits::kEvtNextTimeoutMs, 0, &returned)) {
+        for (DWORD i = 0; i < returned; ++i) {
+            std::wstring xml;
+            bool rendered = RenderEventXml(events[i], xml);
+            EvtClose(events[i]);
+            events[i] = nullptr;
+            if (!rendered)
+                continue;
+
+            FILETIME eventTime = {};
+            std::wstring systemTime = ExtractXmlAttribute(xml, L"<TimeCreated", L"SystemTime");
+            if (!SysmonSystemTimeToFileTime(systemTime, eventTime))
+                continue;
+            ULONGLONG eventValue = FileTimeToU64(eventTime);
+            if (eventValue < boot) {
+                reachedBoot = true;
+                break;
+            }
+
+            std::wstring recordText = ExtractXmlTag(xml, L"EventRecordID");
+            wchar_t* end = nullptr;
+            ULONGLONG recordId = _wcstoui64(recordText.c_str(), &end, 10);
+            if (recordText.empty() || end == recordText.c_str())
+                continue;
+
+            SysmonStructuralRecord record;
+            record.time = eventValue;
+            record.recordId = recordId;
+            record.fileTime = eventTime;
+            record.eventId = _wtoi(ExtractXmlTag(xml, L"EventID").c_str());
+            if (record.eventId == 4)
+                record.state = ExtractSysmonData(xml, L"State");
+            records.push_back(std::move(record));
+        }
+    }
+    EvtClose(query);
+
+    if (records.size() < 2)
+        return;
+    std::reverse(records.begin(), records.end());
+
+    size_t emitted = 0;
+    ULONGLONG stoppedAt = 0;
+    FILETIME stoppedFileTime = {};
+    for (size_t i = 0; i < records.size() && emitted < 12; ++i) {
+        const auto& current = records[i];
+        if (i > 0) {
+            const auto& previous = records[i - 1];
+            if (current.recordId > previous.recordId + 1) {
+                ULONGLONG missing = current.recordId - previous.recordId - 1;
+                std::string detail =
+                    "gap estrutural no Sysmon: EventRecordID " + std::to_string(previous.recordId) +
+                    " -> " + std::to_string(current.recordId) +
+                    " | registros_ausentes=" + std::to_string(missing);
+                AddGenericBypassFinding(out, ScanTag::Sysmon, "Sysmon64.exe",
+                                        WideToUtf8(kChannel), detail, "HIGH",
+                                        "SYSMON.RECORD_ID_GAP", "HIGH", "SUSPICIOUS",
+                                        "Sysmon Operational", &current.fileTime);
+                ++emitted;
+            }
+        }
+
+        if (current.eventId != 4)
+            continue;
+        const bool stopped = SysmonStateContains(current.state, L"STOP") ||
+                             SysmonStateContains(current.state, L"PARAD") ||
+                             SysmonStateContains(current.state, L"INTERROMP");
+        const bool started = SysmonStateContains(current.state, L"START") ||
+                             SysmonStateContains(current.state, L"RUNNING") ||
+                             SysmonStateContains(current.state, L"INICIAD") ||
+                             SysmonStateContains(current.state, L"EXECUCAO");
+        if (stopped) {
+            stoppedAt = current.time;
+            stoppedFileTime = current.fileTime;
+        } else if (started && stoppedAt != 0 && current.time > stoppedAt) {
+            ULONGLONG gapSeconds = (current.time - stoppedAt) / 10000000ULL;
+            if (gapSeconds >= 2) {
+                std::string detail = "gap de telemetria do Sysmon entre stop/start | duracao=" +
+                                     std::to_string(gapSeconds) + "s";
+                AddGenericBypassFinding(out, ScanTag::Sysmon, "Sysmon64.exe",
+                                        WideToUtf8(kChannel), detail, "HIGH",
+                                        "SYSMON.SERVICE_GAP", "HIGH", "SUSPICIOUS",
+                                        "Sysmon Event 4", &stoppedFileTime);
+                ++emitted;
+            }
+            stoppedAt = 0;
+            stoppedFileTime = {};
+        }
+    }
+}
+
 std::vector<ScannerUI::GenericBypassFinding> CollectGenericBypassFindings(std::string& status) {
     std::vector<ScannerUI::GenericBypassFinding> findings;
     ScanNtdllStubIntegrity(findings);        // NTDLL hook detection (internal)
@@ -2085,6 +2490,23 @@ std::vector<ScannerUI::GenericBypassFinding> CollectGenericBypassFindings(std::s
     CollectAntivirusExclusionFindings(findings);
     CollectAntivirusRemovalFindings(findings);
     CollectGenericBypassEventLogs(findings);
+    CollectSysmonAvailabilityGaps(findings);
+    CollectSysmonStructuralGaps(findings);
+
+    // Backstop for detectors intentionally left out of scope for this precision pass
+    // (named pipes, LSP, event-log/sysmon handlers, AV removal, HD-Player external
+    // handles) — mirrors the fallback convention in scanner_files.cpp. Only fills
+    // fields left empty by the detector, so it's a no-op for everything above.
+    for (auto& finding : findings) {
+        if (finding.ruleId.empty())
+            finding.ruleId = "GENERIC_BYPASS." + finding.type;
+        if (finding.source.empty())
+            finding.source = "scanner_generic_bypass";
+        if (finding.confidence.empty())
+            finding.confidence = (finding.severity == "HIGH") ? "MEDIUM" : "LOW";
+        if (finding.evidenceState.empty())
+            finding.evidenceState = (finding.severity == "HIGH") ? "SUSPICIOUS" : "REVIEW";
+    }
 
     std::sort(findings.begin(), findings.end(), [](const auto& a, const auto& b) {
         int ra = DetectionFilter::SeverityRank(a.severity);

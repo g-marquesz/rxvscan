@@ -20,7 +20,6 @@
 #include <cstring>
 #include <cwctype>
 #include <fstream>
-#include <iomanip>
 #include <initializer_list>
 #include <iterator>
 #include <atomic>
@@ -36,7 +35,6 @@
 #include <pdhmsg.h>
 #include <psapi.h>
 #include <softpub.h>
-#include <shellapi.h>
 #include <tlhelp32.h>
 #include <tbs.h>
 #include <winioctl.h>
@@ -44,7 +42,6 @@
 #include <wintrust.h>
 #include <winevt.h>
 #include <ncrypt.h>
-#include <winhttp.h>
 
 #include "scanner_ui.h"
 #include "detection_filters.h"
@@ -66,7 +63,6 @@
 #pragma comment(lib, "tbs.lib")
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "winhttp.lib")
 
 
 static ID3D11Device*           g_pd3dDevice          = nullptr;
@@ -77,159 +73,13 @@ static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 static HWND                    g_hWnd = nullptr;
 std::atomic_bool        g_scanSlow = false;
 std::atomic_bool        g_scanFinished = false;
-
-static void OpenCommunityLinks() {
-    ShellExecuteW(nullptr, L"open", L"https://rxvteam.com", nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-static std::string JsonEscape(const std::string& text) {
-    std::string out;
-    out.reserve(text.size() + 16);
-    for (unsigned char c : text) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"':  out += "\\\""; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (c >= 0x20)
-                out.push_back((char)c);
-            break;
-        }
-    }
-    return out;
-}
-
-static std::wstring Utf8ToWideMain(const std::string& text) {
-    if (text.empty())
-        return {};
-    int chars = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0);
-    if (chars <= 0)
-        return {};
-    std::wstring out((size_t)chars, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), out.data(), chars);
-    return out;
-}
-
-static bool PostDiscordWebhook(const std::string& webhookUrl, const std::string& json,
-                               std::string& error) {
-    std::wstring url = Utf8ToWideMain(webhookUrl);
-    if (url.empty()) {
-        error = "Webhook URL ausente ou invalida";
-        return false;
-    }
-
-    URL_COMPONENTSW parts = {};
-    parts.dwStructSize = sizeof(parts);
-    parts.dwSchemeLength = (DWORD)-1;
-    parts.dwHostNameLength = (DWORD)-1;
-    parts.dwUrlPathLength = (DWORD)-1;
-    parts.dwExtraInfoLength = (DWORD)-1;
-    if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &parts)) {
-        error = "Falha ao interpretar a URL do webhook";
-        return false;
-    }
-
-    std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
-    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
-    if (parts.dwExtraInfoLength > 0)
-        path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-
-    HINTERNET session = WinHttpOpen(L"RXVScan/1.3",
-                                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                    WINHTTP_NO_PROXY_NAME,
-                                    WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) {
-        error = "WinHTTP indisponivel";
-        return false;
-    }
-
-    WinHttpSetTimeouts(session, 5000, 5000, 8000, 8000);
-    HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
-    HINTERNET request = connection
-        ? WinHttpOpenRequest(connection, L"POST", path.c_str(), nullptr,
-                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                             parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
-        : nullptr;
-
-    bool ok = false;
-    if (request) {
-        const wchar_t* headers = L"Content-Type: application/json\r\n";
-        BOOL sent = WinHttpSendRequest(request, headers, (DWORD)-1L,
-                                       (LPVOID)json.data(), (DWORD)json.size(),
-                                       (DWORD)json.size(), 0);
-        if (sent && WinHttpReceiveResponse(request, nullptr)) {
-            DWORD status = 0;
-            DWORD statusSize = sizeof(status);
-            if (WinHttpQueryHeaders(request,
-                                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
-                                    WINHTTP_NO_HEADER_INDEX) &&
-                status >= 200 && status < 300) {
-                ok = true;
-            } else {
-                error = "Discord recusou a requisicao HTTP " + std::to_string(status);
-            }
-        } else {
-            error = "Falha de conexao com o Discord";
-        }
-    } else {
-        error = "Nao foi possivel criar a requisicao HTTPS";
-    }
-
-    if (request) WinHttpCloseHandle(request);
-    if (connection) WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-    return ok;
-}
-
-static std::string BuildResultsWebhookJson(const ScannerUI::ScanData& data) {
-    const int winScan = (int)(data.systemMemoryFindings.size() + data.kernelAnomalies.size());
-    const int bypass = (int)(data.genericBypass.size() + data.streamModFindings.size() +
-                             data.remotePortFindings.size());
-    const int forensics = (int)(data.bam.size() + data.prefetch.size() + data.usnAnomalies.size());
-    const int persistence = (int)(data.registryFindings.size() + data.clsidFindings.size());
-    const int total = winScan + bypass + forensics + persistence +
-                      (int)data.emulatorFindings.size();
-    const int color = total > 0 ? 15158332 : 3066993;
-
-    auto field = [](std::ostringstream& json, const char* name,
-                    const std::string& value, bool comma = true) {
-        json << "{\"name\":\"" << JsonEscape(name) << "\",\"value\":\""
-             << JsonEscape(value) << "\",\"inline\":true}";
-        if (comma) json << ",";
-    };
-
-    std::ostringstream json;
-    json << "{\"username\":\"RXVScan Results\",\"allowed_mentions\":{\"parse\":[]},\"embeds\":[{"
-         << "\"title\":\"Resultado do scanner\","
-         << "\"description\":\"Resumo organizado da verificacao concluida.\","
-         << "\"color\":" << color << ",\"fields\":[";
-    field(json, "Dispositivo", data.device.empty() ? "-" : data.device);
-    field(json, "Sistema", data.osVersion.empty() ? "-" : data.osVersion);
-    field(json, "HWID", data.hwid.empty() ? "-" : data.hwid, false);
-    json << ",";
-    field(json, "WinScan", std::to_string(winScan) + " deteccoes");
-    field(json, "Bypass", std::to_string(bypass) + " deteccoes");
-    field(json, "Forensics", std::to_string(forensics) + " evidencias", false);
-    json << ",";
-    field(json, "Persistence", std::to_string(persistence) + " deteccoes");
-    field(json, "Emulador", data.emulatorStatus + " | " +
-                            std::to_string(data.emulatorFindings.size()) + " deteccoes");
-    field(json, "Sysmon", data.sysmonStatus + " | " +
-                          std::to_string(data.sysmonEvents.size()) + " eventos", false);
-    json << "],\"footer\":{\"text\":\"RXVScan scan completed\"}}]}";
-    return json.str();
-}
+std::atomic_int         g_scanTier = static_cast<int>(ScanTier::Light);
 
 struct RuntimeUsage {
     int cpu = 0;
     int ram = 0;
     int gpu = 0;
-    bool overloaded = false;
+    ScanTier tier = ScanTier::Light;
 };
 
 class RuntimeUsageSampler {
@@ -254,7 +104,12 @@ public:
         usage.cpu = SampleCpu();
         usage.ram = SampleRam();
         usage.gpu = SampleGpu();
-        usage.overloaded = usage.cpu >= 85 || usage.ram >= 90 || usage.gpu >= 90;
+        if (usage.cpu >= 85 || usage.ram >= 90 || usage.gpu >= 90)
+            usage.tier = ScanTier::Overloaded;
+        else if (usage.cpu >= 60 || usage.ram >= 75 || usage.gpu >= 70)
+            usage.tier = ScanTier::Busy;
+        else
+            usage.tier = ScanTier::Light;
         return usage;
     }
 
@@ -346,6 +201,16 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 
 static void OnClose() { PostMessage(g_hWnd, WM_CLOSE, 0, 0); }
 
+// Keeps background scan work from competing evenly with foreground apps/games for
+// CPU and working-set trimming priority; the UI/render thread is left untouched.
+static void ApplyBackgroundScanPriority(HANDLE threadHandle) {
+    if (!threadHandle)
+        return;
+    SetThreadPriority(threadHandle, THREAD_PRIORITY_BELOW_NORMAL);
+    MEMORY_PRIORITY_INFORMATION memPrio = { MEMORY_PRIORITY_LOW };
+    SetThreadInformation(threadHandle, ThreadMemoryPriority, &memPrio, sizeof(memPrio));
+}
+
 
 static const int kTitleBarHeight = 52;
 static const int kTitleBarControlsWidth = 220;
@@ -364,8 +229,7 @@ static int LoadingCardY() {
     return kAppWindowY + (kAppWindowH - kLoadingCardH) / 2;
 }
 
-// Janela do scanner fica fixa no tamanho do cartao de carregamento o tempo
-// todo: so mostra a barra de progresso, sem expandir para um dashboard.
+// Depois da introducao compacta, expande para a interface completa do scanner.
 static void ApplyStartupWindowTransform(float loadingElapsed) {
     static bool finished = false;
     if (finished)
@@ -375,7 +239,7 @@ static void ApplyStartupWindowTransform(float loadingElapsed) {
     if (loadingElapsed >= total) {
         SetWindowLongW(g_hWnd, GWL_EXSTYLE,
             GetWindowLongW(g_hWnd, GWL_EXSTYLE) & ~WS_EX_LAYERED);
-        SetWindowPos(g_hWnd, nullptr, LoadingCardX(), LoadingCardY(), kLoadingCardW, kLoadingCardH,
+        SetWindowPos(g_hWnd, nullptr, kAppWindowX, kAppWindowY, kAppWindowW, kAppWindowH,
             SWP_NOZORDER | SWP_NOACTIVATE);
         ApplyRoundedWindow(g_hWnd);
         finished = true;
@@ -425,9 +289,14 @@ static void LoadReadableFont(ImGuiIO& io) {
 
     static const ImWchar emojiRanges[] = {
         0x1F47E, 0x1F47E,
+        0x1F3AD, 0x1F3AD, // 🎭 LXAScan (DeepScan topic)
+        0x1F489, 0x1F489, // 💉 PLScan (DeepScan topic)
         0x1F4C2, 0x1F4C2,
         0x1F50E, 0x1F50E,
         0x1F6A8, 0x1F6A8,
+        0x1F97E, 0x1F97E, // 🥾 EHKScan (DeepScan topic)
+        0x1F9F5, 0x1F9F5, // 🧵 TRHScan (DeepScan topic)
+        0x1FA9D, 0x1FA9D, // 🪝 HJCScan (DeepScan topic)
         0
     };
     ImFontConfig emojiConfig = {};
@@ -736,7 +605,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     ::ShowWindow(g_hWnd, SW_SHOWDEFAULT);
     ::UpdateWindow(g_hWnd);
-    OpenCommunityLinks();
     std::atomic_bool randomTitleRunning = true;
     std::thread randomTitleThread(RandomizeWindowTitleLoop, std::ref(randomTitleRunning));
 
@@ -764,6 +632,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         LoadPngResource(IDR_PNG_GENERAL, g_pd3dDevice);
     ID3D11ShaderResourceView* g_sysmonIconSrv =
         LoadPngResource(IDR_PNG_SYSMON, g_pd3dDevice);
+    ID3D11ShaderResourceView* g_deepScanIconSrv =
+        LoadPngResource(IDR_PNG_DEEP_SCAN, g_pd3dDevice);
 
     ScannerUI::ScanData data = ScannerUI::MakeSampleData();
     {
@@ -805,12 +675,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         data.winScanIconTexture = g_winScanIconSrv;
         data.kernelScanIconTexture = g_kernelScanIconSrv;
         data.sysmonIconTexture = g_sysmonIconSrv;
+        data.deepScanIconTexture = g_deepScanIconSrv;
     }
     std::mutex dataMutex;
     std::thread scannerThread;
-    bool scannerStarted = true;
-    bool resultsWebhookSent = false;
-    const std::string webhookUrl = "https://discord.com/api/webhooks/1513723289040720014/eMtgY3uWTGVvp6scr0aZI_G-cS62dn4U63WtX_6pnmYDSWXV5boDjaIFuQ9AwQjo8_KL";
 
     RuntimeUsageSampler usageSampler;
     ULONGLONG lastUsageSample = 0;
@@ -818,9 +686,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ULONGLONG loadingIntroStartTick = appStartTick;
     bool loadingStarted = true;
     std::vector<std::thread> commandThreads;
-    std::vector<std::thread> webhookThreads;
     g_scanFinished = false;
     scannerThread = std::thread(RunScannerAsync, std::ref(data), std::ref(dataMutex));
+    HANDLE scannerThreadHandle = reinterpret_cast<HANDLE>(scannerThread.native_handle());
+    ApplyBackgroundScanPriority(scannerThreadHandle);
+    ScanTier lastAppliedTier = ScanTier::Light;
 
     bool done = false;
     while (!done) {
@@ -853,14 +723,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
         if (nowTick - lastUsageSample >= 500) {
             RuntimeUsage usage = usageSampler.Sample();
-            g_scanSlow = usage.overloaded;
+            g_scanTier = static_cast<int>(usage.tier);
+            g_scanSlow = (usage.tier == ScanTier::Overloaded);
+            if (usage.tier != lastAppliedTier) {
+                SetThreadPriority(scannerThreadHandle,
+                    usage.tier == ScanTier::Overloaded ? THREAD_PRIORITY_LOWEST
+                                                        : THREAD_PRIORITY_BELOW_NORMAL);
+                lastAppliedTier = usage.tier;
+            }
             {
                 std::lock_guard<std::mutex> lock(dataMutex);
                 data.cpu = usage.cpu;
                 data.ram = usage.ram;
                 data.gpu = usage.gpu;
-                if (!g_scanFinished.load())
-                    data.speedScan = usage.overloaded ? "slow" : "normal";
+                if (!g_scanFinished.load()) {
+                    data.speedScan = usage.tier == ScanTier::Overloaded ? "slow"
+                                    : usage.tier == ScanTier::Busy ? "busy" : "normal";
+                }
             }
             lastUsageSample = nowTick;
         }
@@ -880,27 +759,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     [](std::thread& t) { return !t.joinable(); }),
                 commandThreads.end());
             commandThreads.emplace_back(RunTerminalCommandAsync, commandToRun, std::ref(data), std::ref(dataMutex));
-        }
-
-        if (scannerStarted && g_scanFinished.load() && !resultsWebhookSent && !webhookUrl.empty()) {
-            ScannerUI::ScanData snapshot;
-            {
-                std::lock_guard<std::mutex> lock(dataMutex);
-                snapshot = data;
-            }
-            resultsWebhookSent = true;
-            const std::string payload = BuildResultsWebhookJson(snapshot);
-            webhookThreads.emplace_back([webhookUrl, payload]() {
-                std::string ignored;
-                PostDiscordWebhook(webhookUrl, payload, ignored);
-            });
+            ApplyBackgroundScanPriority(reinterpret_cast<HANDLE>(commandThreads.back().native_handle()));
         }
 
         const bool overloaded = g_scanSlow.load();
         const bool loadingVisible = ScannerUI::RenderLoadingOverlay(data, loadingElapsed);
         if (!loadingVisible) {
             std::lock_guard<std::mutex> lock(dataMutex);
-            ScannerUI::RenderScanProgressOverlay(data, OnClose);
+            ScannerUI::Render(data, nullptr, OnClose);
         }
 
         ImGui::Render();
@@ -925,8 +791,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     JoinOrDetach(scannerThread);
     for (auto& thread : commandThreads)
         JoinOrDetach(thread);
-    for (auto& thread : webhookThreads)
-        JoinOrDetach(thread, 3000);
     randomTitleRunning = false;
     JoinOrDetach(randomTitleThread, 2000);
 
@@ -937,6 +801,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (g_kernelScanIconSrv) { g_kernelScanIconSrv->Release(); g_kernelScanIconSrv = nullptr; }
     if (g_generalIconSrv) { g_generalIconSrv->Release(); g_generalIconSrv = nullptr; }
     if (g_sysmonIconSrv) { g_sysmonIconSrv->Release(); g_sysmonIconSrv = nullptr; }
+    if (g_deepScanIconSrv) { g_deepScanIconSrv->Release(); g_deepScanIconSrv = nullptr; }
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

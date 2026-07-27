@@ -1,5 +1,6 @@
 ﻿#include "scanner_core.h"
-#include "scanner_upload.h"
+#include "embedded_driver.h"
+#include "rtcore64_driver.h"
 
 void AppendTerminalLine(ScannerUI::ScanData& data, const std::string& line);
 
@@ -74,6 +75,75 @@ void RunTerminalCommandAsync(const std::string& command, ScannerUI::ScanData& da
         return;
     }
 
+    if (normalized == "run!pg4") {
+        {
+            std::lock_guard<std::mutex> lock(dataMutex);
+            if (data.deepScanStatus == "Loading") return;
+            data.deepScanStatus = "Loading";
+            data.deepScanFindings.clear();
+            AppendTerminalLine(data, "> deep scan started");
+        }
+        std::string deepScanStatus;
+        auto deepScanFindings = CollectDeepScanFindings(deepScanStatus);
+        bool xvLoaded = false;
+        bool rtcoreLoaded = false;
+        std::string xvStatus;
+        {
+            XvKernelDriver xv;
+            xvLoaded = xv.Load();
+            xvStatus = xv.Status();
+
+            RTCoreDriver rtcore;
+            if (rtcore.Load(L"")) {
+                rtcoreLoaded = true;
+                auto virtualFindings = rtcore.VerifyKernelVirtualIntegrity();
+                auto physicalFindings = rtcore.VerifyKernelIntegrity();
+                virtualFindings.insert(virtualFindings.end(),
+                                       physicalFindings.begin(), physicalFindings.end());
+                for (const auto& kernel : virtualFindings) {
+                    ScannerUI::DeepScanFinding finding;
+                    finding.type = "KRTSCAN";
+                    finding.process = kernel.driverName;
+                    finding.target = kernel.path;
+                    finding.detail = kernel.reason + " | " + kernel.detail;
+                    finding.severity = kernel.severity;
+                    deepScanFindings.push_back(std::move(finding));
+                }
+
+                auto hiddenProcesses = rtcore.FindHiddenProcesses();
+                for (const auto& hidden : hiddenProcesses) {
+                    std::ostringstream address;
+                    address << std::uppercase << std::hex << hidden.eprocessVirtual;
+                    ScannerUI::DeepScanFinding finding;
+                    finding.type = "DKOM";
+                    finding.process = hidden.imageFileName;
+                    finding.target = "PID:" + std::to_string(hidden.pid);
+                    finding.detail = hidden.reason + " | eprocess_va=0x" + address.str();
+                    finding.severity = "HIGH";
+                    deepScanFindings.push_back(std::move(finding));
+                }
+
+                rtcore.Unload();
+                if (!virtualFindings.empty() || !physicalFindings.empty() ||
+                    !hiddenProcesses.empty())
+                    deepScanStatus = "DETECTED";
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(dataMutex);
+            data.deepScanFindings = std::move(deepScanFindings);
+            data.deepScanStatus   = deepScanStatus;
+            AppendTerminalLine(data, xvLoaded
+                ? "> xvscreen kernel backend loaded and unloaded"
+                : "> xvscreen kernel backend unavailable: " + xvStatus);
+            AppendTerminalLine(data, rtcoreLoaded
+                ? "> RTCore64 read-only virtual/physical kernel verification completed and unloaded"
+                : "> RTCore64 unavailable; user-mode deep scan completed");
+            AppendTerminalLine(data, "> deep scan loaded");
+        }
+        return;
+    }
+
     if (normalized == "xv!pg5") {
         std::lock_guard<std::mutex> lock(dataMutex);
         data.activePage = 3;
@@ -88,45 +158,23 @@ void RunTerminalCommandAsync(const std::string& command, ScannerUI::ScanData& da
 }
 
 static void ScanThrottlePause() {
-    Sleep(g_scanSlow.load() ? 180 : 25);
-}
-
-static std::string ScanUtcTimestamp() {
-    SYSTEMTIME st;
-    GetSystemTime(&st);
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02uZ",
-                  st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    return buf;
-}
-
-static std::string NewClientScanId() {
-    SYSTEMTIME st;
-    GetSystemTime(&st);
-    char buf[96];
-    std::snprintf(buf, sizeof(buf), "%04u%02u%02u-%02u%02u%02u-%lu-%llu",
-                  st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                  GetCurrentProcessId(), static_cast<unsigned long long>(GetTickCount64()));
-    return buf;
-}
-
-static void PublishLiveSnapshot(ScannerUI::ScanData& data,
-                                std::mutex& dataMutex,
-                                const std::string& clientScanId,
-                                const std::string& startedAt,
-                                const std::string& status,
-                                const std::string& stage,
-                                float progress,
-                                bool persistOnFailure = false) {
-    ScannerUI::ScanData snapshot;
-    {
-        std::lock_guard<std::mutex> lock(dataMutex);
-        snapshot = data;
+    switch (static_cast<ScanTier>(g_scanTier.load())) {
+        case ScanTier::Overloaded: Sleep(180); break;
+        case ScanTier::Busy:       Sleep(80);  break;
+        default:                   Sleep(25);  break;
     }
-    if (progress < 0.0f) progress = snapshot.scanProgress;
-    std::string ignoredMessage;
-    ScannerUpload::TryUploadSnapshot(snapshot, clientScanId, startedAt, status,
-                                     stage, progress, persistOnFailure, ignoredMessage);
+}
+
+// Called from inside long-running scan loops (per-process, per-region, per-handle, ...)
+// so a busy machine gets short breathing room mid-stage instead of only between stages.
+void MaybePaceIteration(size_t& counter, size_t everyN) {
+    if (everyN == 0 || (++counter % everyN) != 0)
+        return;
+    switch (static_cast<ScanTier>(g_scanTier.load())) {
+        case ScanTier::Overloaded: Sleep(3);    break;
+        case ScanTier::Busy:       Sleep(1);    break;
+        default:                   Sleep(0);    break;
+    }
 }
 
 void AppendTerminalLine(ScannerUI::ScanData& data, const std::string& line) {
@@ -140,11 +188,7 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
     bool expected = false;
     if (!g_scanRunning.compare_exchange_strong(expected, true))
         return;
-    DetectionFilter::ClearSignatureCache();
-    DetectionFilter::ClearPublisherCache();
-    DetectionFilter::ClearIdentityCache();
-    const std::string clientScanId = NewClientScanId();
-    const std::string startedAt = ScanUtcTimestamp();
+    ResetSystemHandleSnapshot();
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         data.scanProgress = 0.02f;
@@ -168,6 +212,8 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.streamModFindings.clear();
         data.remotePortStatus = "Loading";
         data.remotePortFindings.clear();
+        data.deepScanStatus = "Waiting";
+        data.deepScanFindings.clear();
         data.systemMemoryStatus = "Loading";
         data.systemMemoryFindings.clear();
         data.efiCheatStatus = "Waiting";
@@ -184,55 +230,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.clsidCleanConfirmed  = false;
         AppendTerminalLine(data, "> scanner started");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Inicializando scanner", 0.02f);
-
-    // Checa HWID contra a blacklist de exposeds publicada no site.
-    // Falha de rede / sem config é silenciosa: blacklist é um bônus, não um requisito.
-    {
-        std::string hwidCopy;
-        {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            hwidCopy = data.hwid;
-        }
-        ScannerUpload::BlacklistHit hit = ScannerUpload::CheckHwidBlacklist(hwidCopy);
-        if (hit.blacklisted) {
-            ScannerUI::GenericBypassFinding f;
-            std::string now = ScanUtcTimestamp(); // YYYY-MM-DDTHH:MM:SSZ
-            f.date = now.substr(0, 10);
-            f.time = now.size() >= 19 ? now.substr(11, 8) : "";
-            f.type = "HWID_BLACKLIST";
-            f.process = "rxvscan";
-            f.target = hwidCopy;
-            std::string detail = hit.title;
-            if (!hit.summary.empty()) {
-                if (!detail.empty()) detail += " — ";
-                detail += hit.summary;
-            }
-            if (!hit.exposedId.empty()) {
-                detail += " (exposed=" + hit.exposedId + ")";
-            }
-            f.detail = detail;
-            std::string sev = hit.severity;
-            for (auto& c : sev) c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
-            f.severity = (sev == "CRITICAL" || sev == "HIGH") ? "HIGH"
-                       : (sev == "LOW") ? "FLAG" : "HIGH";
-            f.ruleId = "exposed.hwid";
-            f.source = "rxvteam.blacklist";
-            f.confidence = "HIGH";
-            f.evidenceState = "CONFIRMED";
-
-            std::lock_guard<std::mutex> lock(dataMutex);
-            data.genericBypass.push_back(std::move(f));
-            AppendTerminalLine(data,
-                std::string("> HWID na blacklist da comunidade: ") + hit.title);
-        } else if (!hit.error.empty() && hit.error != "no_config" && hit.error != "no_hwid") {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            AppendTerminalLine(data,
-                std::string("> blacklist check skipped: ") + hit.error);
-        }
-    }
-
     try {
 
     ScanThrottlePause();
@@ -252,8 +249,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.currentStage = "Coletando informacoes do sistema";
         AppendTerminalLine(data, "> system info loaded");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Informacoes do sistema", 0.12f);
 
     ScanThrottlePause();
     std::string sysmonStatus;
@@ -300,8 +295,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.currentStage = "Verificando Prefetch e USN Journal";
         AppendTerminalLine(data, "> Prefetch/USN comparison loaded");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Prefetch e USN Journal", 0.72f);
 
     // P5 — Timeline correlation (BAM × Prefetch × USN)
     ScanThrottlePause();
@@ -329,6 +322,31 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
     ScanThrottlePause();
     auto emulatorRuntime = CollectEmulatorRuntimeInfo();
     auto emulatorFindings = CollectEmulatorIntegrityFindings();
+    bool xvKernelLoaded = false;
+    bool emulatorKernelLoaded = false;
+    std::string xvKernelStatus;
+    {
+        XvKernelDriver xv;
+        xvKernelLoaded = xv.Load();
+        xvKernelStatus = xv.Status();
+
+        RTCoreDriver rtcore;
+        if (rtcore.Load(L"")) {
+            emulatorKernelLoaded = true;
+            auto kernelFindings = rtcore.VerifyKernelVirtualIntegrity();
+            for (const auto& kernel : kernelFindings) {
+                ScannerUI::EmulatorFinding finding;
+                finding.process = kernel.driverName.empty() ? "Kernel" : kernel.driverName;
+                finding.type = ScanTag::MemoryProtect;
+                finding.address = kernel.path.empty() ? "kernel" : kernel.path;
+                finding.detail = "Kernel backend detectou interferencia nas APIs de memoria/thread"
+                                 " | " + kernel.reason + " | " + kernel.detail;
+                finding.severity = kernel.severity;
+                emulatorFindings.push_back(std::move(finding));
+            }
+            rtcore.Unload();
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         data.emulatorFindings = std::move(emulatorFindings);
@@ -346,14 +364,19 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         }
         data.scanProgress = 0.84f;
         data.currentStage = "Checando integridade do emulador";
+        AppendTerminalLine(data, xvKernelLoaded
+            ? "> xvscreen kernel backend loaded and unloaded"
+            : "> xvscreen kernel backend unavailable: " + xvKernelStatus);
+        AppendTerminalLine(data, emulatorKernelLoaded
+            ? "> RTCore64 kernel attestation completed and driver unloaded"
+            : "> RTCore64 backend unavailable; memory/thread scan completed");
         AppendTerminalLine(data, "> emulator integrity loaded");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Integridade do emulador", 0.84f);
 
     ScanThrottlePause();
     std::string sysmemStatus;
-    auto sysmemFindings = CollectSystemMemoryFindings(sysmemStatus);
+    std::vector<ScannerUI::EmulatorFinding> suspiciousProcessFindings;
+    auto sysmemFindings = CollectSystemMemoryFindings(sysmemStatus, suspiciousProcessFindings);
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         data.systemMemoryFindings = std::move(sysmemFindings);
@@ -364,13 +387,25 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
     }
 
     ScanThrottlePause();
-    std::string suspProcStatus;
-    auto suspProcFindings = CollectSuspiciousProcesses(suspProcStatus);
     {
+        // Mesma posicao/ordem de hoje: achados de heuristica de processo suspeito,
+        // gerados dentro do laco unico de CollectSystemMemoryFindings acima (sem cap,
+        // igual ao comportamento anterior da CollectSuspiciousProcesses removida).
         std::lock_guard<std::mutex> lock(dataMutex);
-        for (auto& f : suspProcFindings)
+        for (auto& f : suspiciousProcessFindings)
             data.systemMemoryFindings.push_back(f);
         AppendTerminalLine(data, "> suspicious process scan loaded");
+    }
+
+    ScanThrottlePause();
+    {
+        // DKOM cross-check (Toolhelp vs NtQuerySystemInformation) — antes rodava
+        // embutido no final da CollectSuspiciousProcesses removida; mesma posicao.
+        auto dkomFindings = CollectDkomAnomalies();
+        std::lock_guard<std::mutex> lock(dataMutex);
+        for (auto& f : dkomFindings)
+            data.systemMemoryFindings.push_back(f);
+        AppendTerminalLine(data, "> DKOM cross-check loaded");
     }
 
     ScanThrottlePause();
@@ -384,8 +419,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.currentStage = "Procurando bypass e injecoes";
         AppendTerminalLine(data, "> generic bypass loaded");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Bypass e memoria", 0.95f);
 
     ScanThrottlePause();
     std::string streamModStatus;
@@ -429,8 +462,12 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         data.currentStage = "Checando portas remotas e rede";
         AppendTerminalLine(data, "> remote port listener scan loaded");
     }
-    PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                        "running", "Portas remotas e rede", 0.975f);
+
+    // DeepScan (PLScan/HJCScan/EHKScan) nao roda automaticamente aqui - e caro
+    // (varredura de memoria de todos os processos, comandos TPM crus, leitura
+    // de arquivos EFI) e so deve rodar quando o usuario clica no botao de scan
+    // do proprio painel (comando "run!pg4", tratado acima). data.deepScanStatus
+    // fica em "Waiting" ate isso acontecer.
 
     ScanThrottlePause();
     {
@@ -449,6 +486,32 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
         std::string clsidStatus;
         auto clsidFindings = CollectClsidHijackFindings(clsidStatus);
         std::lock_guard<std::mutex> lock(dataMutex);
+        bool clsidHigh = false;
+        for (const auto& clsid : clsidFindings) {
+            ScannerUI::GenericBypassFinding finding;
+            finding.date = clsid.date;
+            finding.time = clsid.time;
+            finding.type = clsid.serverType == "Hidden" ? "CLSID_HIDDEN" :
+                           clsid.serverType == "Deleted" ? "CLSID_DELETED" :
+                                                           "CLSID_DEVIATION";
+            const bool hasServerPath = clsid.serverType != "Hidden" &&
+                                       clsid.serverType != "Deleted" &&
+                                       !clsid.serverPath.empty() && clsid.serverPath != "-";
+            finding.process = hasServerPath ? clsid.serverPath : clsid.hivePath;
+            finding.target = clsid.clsid;
+            finding.detail = clsid.reason + " | server_type=" + clsid.serverType +
+                             " | server=" + clsid.serverPath + " | " + clsid.detail;
+            finding.severity = clsid.severity;
+            finding.ruleId = "REG.COM.CLSID_" + finding.type;
+            finding.source = clsid.serverType == "Deleted" ? "Sysmon registry telemetry" :
+                                                               "Registry cross-view";
+            finding.confidence = clsid.serverType == "Hidden" ? "HIGH" : "MEDIUM";
+            finding.evidenceState = clsid.serverType == "Hidden" ? "SUSPICIOUS" : "REVIEW";
+            clsidHigh |= clsid.severity == "HIGH";
+            data.genericBypass.push_back(std::move(finding));
+        }
+        if (!clsidFindings.empty())
+            data.genericBypassStatus = clsidHigh ? "DETECTED" : "REVIEW";
         data.clsidFindings = std::move(clsidFindings);
         data.clsidStatus   = clsidStatus;
         data.scanProgress  = 0.993f;
@@ -458,6 +521,7 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
 
     std::string kernelAnomalyStatus;
     auto kernelAnomalies = CollectKernelAnomalies(kernelAnomalyStatus);
+
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         data.kernelAnomalies = std::move(kernelAnomalies);
@@ -471,20 +535,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
     }
     ExportScanReportToZ(data);
 
-    {
-        ScannerUI::ScanData snapshot;
-        {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            snapshot = data;
-        }
-        std::string uploadMsg;
-        ScannerUpload::TryUploadSnapshot(snapshot, clientScanId, startedAt,
-                                         "complete", "Scan concluido", 1.0f,
-                                         true, uploadMsg);
-        std::lock_guard<std::mutex> lock(dataMutex);
-        AppendTerminalLine(data, std::string("> ") + uploadMsg);
-    }
-
     } catch (const std::exception& ex) {
         {
             std::lock_guard<std::mutex> lock(dataMutex);
@@ -492,8 +542,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
             data.currentStage = "Falha durante o scan";
             AppendTerminalLine(data, std::string("> scan crashed: ") + ex.what());
         }
-        PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                            "error", "Falha durante o scan", -1.0f, true);
     } catch (...) {
         {
             std::lock_guard<std::mutex> lock(dataMutex);
@@ -501,8 +549,6 @@ void RunScannerAsync(ScannerUI::ScanData& data, std::mutex& dataMutex) {
             data.currentStage = "Falha durante o scan";
             AppendTerminalLine(data, "> scan crashed: unknown exception");
         }
-        PublishLiveSnapshot(data, dataMutex, clientScanId, startedAt,
-                            "error", "Falha durante o scan", -1.0f, true);
     }
     g_scanFinished = true;
     g_scanRunning = false;

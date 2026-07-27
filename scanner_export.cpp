@@ -195,6 +195,16 @@ static void WriteReport(const ScannerUI::ScanData& d, const std::wstring& outDir
         f << "    Detail:  " << x.detail << "\n\n";
     }
 
+    // DeepScan
+    WriteSection(f, "DEEPSCAN", d.deepScanStatus);
+    if (d.deepScanFindings.empty()) { f << "  (none)\n"; }
+    for (const auto& x : d.deepScanFindings) {
+        f << "  [" << x.severity << "] " << x.type << "\n";
+        f << "    Process: " << x.process << "\n";
+        f << "    Target:  " << x.target << "\n";
+        f << "    Detail:  " << x.detail << "\n\n";
+    }
+
     // Remote Ports
     WriteSection(f, "REMOTE PORTS", d.remotePortStatus);
     if (d.remotePortFindings.empty()) { f << "  (none)\n"; }

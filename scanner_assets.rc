@@ -6,3 +6,7 @@ IDR_PNG_WINSCAN RCDATA "assets\\winscan.png"
 IDR_PNG_KERNEL_SCAN RCDATA "assets\\kernel-scan.png"
 IDR_PNG_GENERAL RCDATA "assets\\general.png"
 IDR_PNG_SYSMON RCDATA "assets\\sysmon.png"
+IDR_PNG_DEEP_SCAN RCDATA "assets\\deep-scan.png"
+
+IDR_DRIVER_XVSCREEN RCDATA "assets\\drivers\\xvscreenS.sys"
+IDR_DRIVER_RTCORE64 RCDATA "assets\\drivers\\RTCore64.sys"

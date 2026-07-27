@@ -1,4 +1,5 @@
 #include "scanner_core.h"
+#pragma comment(lib, "version.lib")
 
 using NtQueryVirtualMemoryFn = LONG (WINAPI*)(HANDLE, PVOID, ULONG, PVOID, SIZE_T, PSIZE_T);
 using NtGetNextThreadFn      = LONG (WINAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
@@ -38,6 +39,12 @@ static bool IsExecutableProtection(DWORD protect) {
 static bool IsWriteExecuteProtection(DWORD protect) {
     DWORD base = protect & 0xff;
     return base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
+}
+
+static bool IsWritableOrWriteExecuteProtection(DWORD protect) {
+    DWORD base = protect & 0xff;
+    return base == PAGE_READWRITE || base == PAGE_WRITECOPY ||
+           base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
 }
 
 // Tag constants are defined in scanner_core.h under namespace ScanTag.
@@ -466,8 +473,10 @@ static void ScanExecutablePrivateMemory(HANDLE process, const std::string& proce
     uintptr_t address = 0;
     MEMORY_BASIC_INFORMATION mbi = {};
     std::unordered_set<uintptr_t> seenAllocBases;
+    size_t paceCounter = 0;
     while (address < kScanLimit &&
            VirtualQueryEx(process, reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)) == sizeof(mbi)) {
+        MaybePaceIteration(paceCounter, 48);
         uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
         uintptr_t end = base + mbi.RegionSize;
         if (mbi.State == MEM_COMMIT && IsExecutableProtection(mbi.Protect) && !AddressInsideModule(base, modules)) {
@@ -571,8 +580,10 @@ static void ScanThreadStartAddresses(DWORD pid, const std::string& processName, 
 
     THREADENTRY32 entry = {};
     entry.dwSize = sizeof(entry);
+    size_t paceCounter = 0;
     if (Thread32First(snapshot, &entry)) {
         do {
+            MaybePaceIteration(paceCounter, 64);
             if (entry.th32OwnerProcessID != pid)
                 continue;
 
@@ -665,6 +676,136 @@ static void ScanThreadStartAddresses(DWORD pid, const std::string& processName, 
 // Detects binary patching (checksum mismatch), packer sections, and missing Rich
 // headers without relying on module name, path, or file size.
 // Trust gate: IsTrustedSignedCached only — signature is the only reliable signal.
+struct ExpectedMsysRuntimeProfile {
+    bool valid = false;
+    DWORD autoloadRva = 0;
+    DWORD autoloadSize = 0;
+};
+
+static std::wstring QueryModuleVersionString(const std::vector<BYTE>& data,
+                                             WORD language, WORD codepage,
+                                             const wchar_t* key) {
+    wchar_t block[128] = {};
+    swprintf_s(block, L"\\StringFileInfo\\%04x%04x\\%s", language, codepage, key);
+    LPVOID value = nullptr;
+    UINT length = 0;
+    if (VerQueryValueW(const_cast<BYTE*>(data.data()), block, &value, &length) &&
+        value && length > 1)
+        return reinterpret_cast<const wchar_t*>(value);
+    return {};
+}
+
+static ExpectedMsysRuntimeProfile AnalyzeExpectedMsysRuntime(const std::wstring& path) {
+    ExpectedMsysRuntimeProfile profile;
+    if (ToUpperInvariant(BaseNameFromPath(path)) != L"MSYS-2.0.DLL")
+        return profile;
+
+    const std::wstring pathUpper = ToUpperInvariant(path);
+    const bool expectedInstallPath =
+        DetectionFilter::ClassifyPath(path) == DetectionFilter::PathClass::ProgramFiles ||
+        pathUpper.find(L"\\MSYS64\\USR\\BIN\\MSYS-2.0.DLL") != std::wstring::npos;
+    if (!expectedInstallPath)
+        return profile;
+
+    DWORD ignored = 0;
+    DWORD versionSize = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    if (!versionSize)
+        return profile;
+    std::vector<BYTE> versionData(versionSize);
+    if (!GetFileVersionInfoW(path.c_str(), 0, versionSize, versionData.data()))
+        return profile;
+
+    struct Translation { WORD language; WORD codepage; };
+    Translation* translations = nullptr;
+    UINT translationBytes = 0;
+    std::vector<Translation> candidates;
+    if (VerQueryValueW(versionData.data(), L"\\VarFileInfo\\Translation",
+                       reinterpret_cast<LPVOID*>(&translations), &translationBytes) &&
+        translations && translationBytes >= sizeof(Translation)) {
+        size_t count = translationBytes / sizeof(Translation);
+        for (size_t i = 0; i < count && i < 8; ++i)
+            candidates.push_back(translations[i]);
+    }
+    candidates.push_back({ 0x0409, 0x04B0 });
+    candidates.push_back({ 0x0409, 0x04E4 });
+
+    std::wstring company, product, original;
+    for (const auto& candidate : candidates) {
+        if (company.empty())
+            company = QueryModuleVersionString(versionData, candidate.language,
+                                               candidate.codepage, L"CompanyName");
+        if (product.empty())
+            product = QueryModuleVersionString(versionData, candidate.language,
+                                               candidate.codepage, L"ProductName");
+        if (original.empty())
+            original = QueryModuleVersionString(versionData, candidate.language,
+                                                candidate.codepage, L"OriginalFilename");
+    }
+    if (ToUpperInvariant(company).find(L"RED HAT") == std::wstring::npos ||
+        ToUpperInvariant(product).find(L"MSYS2") == std::wstring::npos ||
+        ToUpperInvariant(original) != L"MSYS-2.0.DLL")
+        return profile;
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return profile;
+    BYTE headers[4096] = {};
+    DWORD read = 0;
+    bool readOk = ReadFile(file, headers, sizeof(headers), &read, nullptr) != FALSE;
+    CloseHandle(file);
+    if (!readOk || read < sizeof(IMAGE_DOS_HEADER))
+        return profile;
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(headers);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+        return profile;
+    size_t peOffset = static_cast<size_t>(dos->e_lfanew);
+    if (peOffset + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) > read ||
+        *reinterpret_cast<const DWORD*>(headers + peOffset) != IMAGE_NT_SIGNATURE)
+        return profile;
+
+    const auto* fileHeader = reinterpret_cast<const IMAGE_FILE_HEADER*>(
+        headers + peOffset + sizeof(DWORD));
+    size_t sectionTable = peOffset + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
+                          fileHeader->SizeOfOptionalHeader;
+    bool sawAutoload = false;
+    static const char* badNames[] = {
+        "packed", "themida", ".vmp", "protect", "petite", "upx", ".ndata", "sforce", nullptr
+    };
+    for (WORD i = 0; i < fileHeader->NumberOfSections && i < 96; ++i) {
+        size_t offset = sectionTable + static_cast<size_t>(i) * sizeof(IMAGE_SECTION_HEADER);
+        if (offset + sizeof(IMAGE_SECTION_HEADER) > read)
+            return ExpectedMsysRuntimeProfile{};
+        const auto* section = reinterpret_cast<const IMAGE_SECTION_HEADER*>(headers + offset);
+        char name[9] = {};
+        memcpy(name, section->Name, 8);
+        for (int n = 0; n < 8 && name[n]; ++n)
+            if (static_cast<unsigned char>(name[n]) > 127)
+                return ExpectedMsysRuntimeProfile{};
+        char lower[9] = {};
+        for (int n = 0; n < 8; ++n)
+            lower[n] = static_cast<char>(tolower(static_cast<unsigned char>(name[n])));
+        for (int n = 0; badNames[n]; ++n)
+            if (strstr(lower, badNames[n]))
+                return ExpectedMsysRuntimeProfile{};
+
+        const bool writableExecutable =
+            (section->Characteristics & IMAGE_SCN_MEM_WRITE) != 0 &&
+            (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+        if (!writableExecutable)
+            continue;
+        if (strncmp(lower, ".autoloa", 8) != 0)
+            return ExpectedMsysRuntimeProfile{};
+        profile.autoloadRva = section->VirtualAddress;
+        profile.autoloadSize = (std::max)(section->Misc.VirtualSize, section->SizeOfRawData);
+        sawAutoload = profile.autoloadSize != 0;
+    }
+    profile.valid = sawAutoload;
+    return profile;
+}
+
 static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& processName,
                                       const std::vector<ModuleRange>& modules,
                                       std::vector<ScannerUI::EmulatorFinding>& out) {
@@ -678,6 +819,7 @@ static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& pro
         DetectionFilter::EfiPeInfo pe = DetectionFilter::AnalyzeEfiPe(mod.path);
         if (!pe.valid)
             continue;
+        const ExpectedMsysRuntimeProfile msysProfile = AnalyzeExpectedMsysRuntime(mod.path);
 
         std::string modName = WideToUtf8(BaseNameFromPath(mod.path));
 
@@ -692,7 +834,7 @@ static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& pro
         }
 
         // ── 2. Packer sections: .vmp, .themida, packed, etc. ──────────────────
-        if (pe.badSections) {
+        if (pe.badSections && !msysProfile.valid) {
             std::string detail = "Modulo com secoes de packer/protecao: " + modName +
                                  " | secoes anomalas detectadas (obfuscator/packer)";
             if (out.size() < ScanLimits::kMaxSysmemFindings)
@@ -702,27 +844,30 @@ static void ScanLoadedModuleAnomalies(HANDLE /*process*/, const std::string& pro
     }
 }
 
-// ─── Mudanca 5: Intra-process injection handle scan ───────────────────────────
-// Enumerates all system handles owned by 'pid' and flags any that point to a
-// DIFFERENT process with combined write+thread-create rights — the classic
-// injection combo. Uses NtQuerySystemInformation(SystemHandleInformation) which
-// gives all handles system-wide; we filter by owner PID then resolve target PID.
-static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procName,
-                                           std::vector<ScannerUI::EmulatorFinding>& out) {
-    // Se o processo FONTE e assinado por publisher reconhecido, seus handles inter-processo
-    // sao legitimos (NVIDIA service, Steam launcher, VS debugger, etc.).
-    // Esta verificacao usa Authenticode — nao depende de nome, pasta ou tamanho do processo.
-    std::wstring sourcePath = ProcessFullPathW(pid);
-    if (!sourcePath.empty() && DetectionFilter::IsTrustedSignedCached(sourcePath))
-        return;
+// Fetched at most once per scan run (see ResetSystemHandleSnapshot, called from
+// RunScannerAsync) and reused by every consumer that used to re-query the whole
+// system handle table on its own: ScanSuspiciousHandlesInProcess below, the DKOM
+// cross-check further down, and CollectHdPlayerExternalHandles in
+// scanner_generic_bypass.cpp. Nothing that used to be checked stops being
+// checked — the OS is just asked for the table once instead of N times.
+static SystemHandleSnapshot g_systemHandleSnapshot;
+static bool g_systemHandleSnapshotFetched = false;
 
-    constexpr DWORD kInjectCombo = PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION;
+void ResetSystemHandleSnapshot() {
+    g_systemHandleSnapshotFetched = false;
+    g_systemHandleSnapshot = SystemHandleSnapshot{};
+}
+
+const SystemHandleSnapshot& GetSystemHandleSnapshot() {
+    if (g_systemHandleSnapshotFetched)
+        return g_systemHandleSnapshot;
+    g_systemHandleSnapshotFetched = true; // don't retry a failed fetch mid-scan
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto querySystem = ntdll ? reinterpret_cast<NtQuerySystemInformationFn>(
         GetProcAddress(ntdll, "NtQuerySystemInformation")) : nullptr;
     if (!querySystem)
-        return;
+        return g_systemHandleSnapshot;
 
     ULONG bufSize = 1u << 20;
     std::vector<BYTE> buf(bufSize);
@@ -734,6 +879,22 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
         st = querySystem(64, buf.data(), bufSize, &needed);
     }
     if (st < 0)
+        return g_systemHandleSnapshot;
+
+    g_systemHandleSnapshot.buffer = std::move(buf);
+    g_systemHandleSnapshot.ok = true;
+    return g_systemHandleSnapshot;
+}
+
+// ─── Mudanca 5: Intra-process injection handle scan ───────────────────────────
+// Enumerates handles owned by 'pid' and reports only the injection-capable ones
+// whose resolved target is exactly HD-Player.exe.
+static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procName,
+                                           std::vector<ScannerUI::EmulatorFinding>& out) {
+    constexpr DWORD kInjectCombo = PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION;
+
+    const SystemHandleSnapshot& snapshot = GetSystemHandleSnapshot();
+    if (!snapshot.ok)
         return;
 
     // Open the target process so we can DuplicateHandle its handles.
@@ -741,10 +902,12 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
     if (!targetProc)
         return;
 
-    auto* info = reinterpret_cast<SystemHandleInformationEx*>(buf.data());
+    const auto* info = snapshot.Info();
     std::unordered_set<std::string> seen;
 
+    size_t paceCounter = 0;
     for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i) {
+        MaybePaceIteration(paceCounter, 4096);
         const auto& h = info->Handles[i];
         if ((DWORD)h.UniqueProcessId != pid)
             continue;
@@ -763,21 +926,20 @@ static void ScanSuspiciousHandlesInProcess(DWORD pid, const std::string& procNam
         if (targetPid == 0 || targetPid == pid)
             continue; // skip null or self-handle
 
+        // This rule only reports handles whose resolved target is HD-Player.exe.
+        std::wstring targetPath = ProcessFullPathW(targetPid);
+        if (targetPath.empty() || !IsHdPlayerProcess(BaseNameFromPath(targetPath)))
+            continue;
+
         // Deduplicate by (targetPid, access) to avoid flood from multi-handle injectors.
         std::string key = std::to_string(targetPid) + ":" +
                           std::to_string(h.GrantedAccess);
         if (!seen.insert(key).second)
             continue;
 
-        // Trust: if BOTH processes are signed by the same publisher this is an
-        // inter-process JIT or telemetry channel (e.g. Chrome renderer → browser).
-        std::wstring targetPath = ProcessFullPathW(targetPid);
-        if (!targetPath.empty() && DetectionFilter::IsTrustedSignedCached(targetPath))
-            continue;
-
         std::ostringstream detail;
         detail << "Handle de injecao detectado: pid=" << pid
-               << " possui handle no pid=" << targetPid
+               << " possui handle no HD-Player.exe pid=" << targetPid
                << " | access=0x" << std::hex << std::uppercase << h.GrantedAccess
                << " | VM_WRITE+CREATE_THREAD+VM_OPERATION confirmados";
         if (out.size() < ScanLimits::kMaxSysmemFindings)
@@ -812,14 +974,26 @@ static void ScanAnomalousModuleProtections(HANDLE process, const std::string& pr
         bool isGfxModule = DetectionFilter::ExportsGraphicsSymbol(modHdr, mhg, mod.begin);
 
         std::wstring file = BaseNameFromPath(mod.path);
+        const ExpectedMsysRuntimeProfile msysProfile = AnalyzeExpectedMsysRuntime(mod.path);
         bool flaggedThisMod = false;
         uintptr_t addr = mod.begin;
+        size_t paceCounter = 0;
         while (addr < mod.end && !flaggedThisMod) {
+            MaybePaceIteration(paceCounter, 48);
             MEMORY_BASIC_INFORMATION mbi = {};
             if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) != sizeof(mbi))
                 break;
             if (mbi.State == MEM_COMMIT && IsWriteExecuteProtection(mbi.Protect) &&
                 mbi.RegionSize >= 4096) {
+                const uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                const uintptr_t autoloadBegin = mod.begin + msysProfile.autoloadRva;
+                const uintptr_t autoloadEnd = autoloadBegin + msysProfile.autoloadSize;
+                if (msysProfile.valid && regionBase >= autoloadBegin && regionBase < autoloadEnd) {
+                    uintptr_t next = regionBase + mbi.RegionSize;
+                    if (next <= addr) break;
+                    addr = next;
+                    continue;
+                }
                 uintptr_t allocBase = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
                 bool isGfxHookTarget = gfxHookDests && allocBase && gfxHookDests->count(allocBase) > 0;
                 // HIGH only when the module is graphics-related or is a confirmed hook destination.
@@ -847,14 +1021,40 @@ static void ScanAnomalousModuleProtections(HANDLE process, const std::string& pr
 // Finds MEM_IMAGE regions that are not listed in the PEB InLoadOrderModuleList.
 // Manual mappers unlink injected DLLs from the PEB to hide them from module
 // enumeration APIs — this detects the remaining mapped image regions.
-static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
-                                  const std::vector<ModuleRange>& modules,
-                                  std::vector<ScannerUI::EmulatorFinding>& out) {
+static bool QueryMappedImagePath(HANDLE process, PVOID address, std::wstring& path) {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto NtQueryVirtMem = ntdll ? reinterpret_cast<NtQueryVirtualMemoryFn>(
         GetProcAddress(ntdll, "NtQueryVirtualMemory")) : nullptr;
-    if (!NtQueryVirtMem) return;
+    if (!NtQueryVirtMem)
+        return false;
 
+    constexpr size_t kBufSize = (MAX_PATH * 4 + 32) * sizeof(wchar_t);
+    alignas(8) BYTE nameBuf[kBufSize] = {};
+    SIZE_T retLen = 0;
+    if (NtQueryVirtMem(process, address, 2, nameBuf, kBufSize, &retLen) < 0)
+        return false;
+
+    USHORT strLen = *reinterpret_cast<const USHORT*>(nameBuf);
+    PWSTR bufPtr = nullptr;
+    memcpy(&bufPtr, nameBuf + 8, sizeof(PWSTR));
+    const uintptr_t bufferBegin = reinterpret_cast<uintptr_t>(nameBuf);
+    const uintptr_t bufferEnd = bufferBegin + kBufSize;
+    const uintptr_t textBegin = reinterpret_cast<uintptr_t>(bufPtr);
+    if (!bufPtr || strLen == 0 || (strLen % sizeof(wchar_t)) != 0 ||
+        textBegin < bufferBegin || textBegin + strLen > bufferEnd)
+        return false;
+
+    std::wstring devicePath(bufPtr, strLen / sizeof(wchar_t));
+    path = DevicePathToDosPath(devicePath);
+    if (path.empty())
+        path = std::move(devicePath);
+    return !path.empty();
+}
+
+static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
+                                  const std::vector<ModuleRange>& modules,
+                                  std::vector<ScannerUI::EmulatorFinding>& out,
+                                  const std::unordered_set<uintptr_t>* activeThreadBases = nullptr) {
     // Build lookup sets from the known module list
     std::unordered_set<uintptr_t> knownBases;
     std::unordered_set<std::wstring> knownPaths;
@@ -867,52 +1067,71 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
     uintptr_t addr = 0x10000;
     MEMORY_BASIC_INFORMATION mbi = {};
     std::unordered_set<uintptr_t> seenAlloc;
+    size_t paceCounter = 0;
 
     while (addr < 0x00007FFFFFFEFFFF && out.size() < ScanLimits::kMaxSysmemFindings) {
+        MaybePaceIteration(paceCounter, 48);
         SIZE_T ret = VirtualQueryEx(process, (LPCVOID)addr, &mbi, sizeof(mbi));
         if (!ret) break;
         uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         if (next <= addr) break;
         addr = next;
 
-        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE) continue;
+        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE ||
+            !IsExecutableProtection(mbi.Protect)) continue;
 
         uintptr_t allocBase = (uintptr_t)mbi.AllocationBase;
         if (!seenAlloc.insert(allocBase).second) continue;
+        const bool hasPeHeader = DetectionFilter::HasPEHeader(process, mbi.AllocationBase);
+        const bool hasActiveThread = activeThreadBases && activeThreadBases->count(allocBase) > 0;
+        const bool writeExec = IsWriteExecuteProtection(mbi.Protect);
         if (knownBases.count(allocBase)) continue; // visible in PEB → legitimate
 
         // Query the mapped filename via NtQueryVirtualMemory class 2 (MemoryMappedFilenameInformation)
-        constexpr size_t kBufSize = (MAX_PATH * 2 + 16) * sizeof(wchar_t);
-        alignas(8) BYTE nameBuf[kBufSize] = {};
-        SIZE_T retLen = 0;
-        LONG st = NtQueryVirtMem(process, mbi.AllocationBase, 2, nameBuf, kBufSize, &retLen);
-        if (st < 0) {
+        std::wstring dosPath;
+        if (!QueryMappedImagePath(process, mbi.AllocationBase, dosPath)) {
             // Can't get filename — still flag anonymous MEM_IMAGE (very suspicious)
-            std::string detail = "MEM_IMAGE region nao listada na PEB (sem nome) | base=" + HexAddress(allocBase);
+            if (!hasPeHeader || (!hasActiveThread && !writeExec))
+                continue;
+            std::string detail = "MEM_IMAGE executavel fora da lista de modulos, sem backing resolvido"
+                                 " | base=" + HexAddress(allocBase) +
+                                 " | thread=" + (hasActiveThread ? std::string("yes") : std::string("no")) +
+                                 " | protect=" + ProtectionToString(mbi.Protect);
             AddEmulatorFinding(out, procName, kTagManualMapping, allocBase, detail, "HIGH");
             continue;
         }
 
         // UNICODE_STRING layout on x64: USHORT Length(0), MaxLen(2), padding(4), PWSTR Buffer(8)
         // The Buffer pointer points into our own nameBuf (kernel fills it in).
-        USHORT strLen = *reinterpret_cast<const USHORT*>(nameBuf);
-        if (strLen == 0 || strLen > (USHORT)(kBufSize - 16)) continue;
-        PWSTR bufPtr = nullptr;
-        memcpy(&bufPtr, nameBuf + 8, sizeof(PWSTR));
-        if (!bufPtr) continue;
-        std::wstring devicePath(bufPtr, strLen / sizeof(wchar_t));
-        std::wstring dosPath = DevicePathToDosPath(devicePath);
-
-        if (dosPath.empty()) dosPath = devicePath;
         std::wstring dosUp = ToUpperInvariant(dosPath);
 
         if (knownPaths.count(dosUp)) continue; // same file, different mapping base — skip
 
-        std::string detail = "DLL injetada oculta na PEB (module unlinking): " +
-                             WideToUtf8(dosPath) +
-                             " | base=" + HexAddress(allocBase) +
-                             " | nao aparece no modulo list";
-        AddEmulatorFinding(out, procName, kTagManualMapping, allocBase, detail, "HIGH");
+        const bool backingExists = FileExistsW(dosPath);
+        const bool trustedBacking = backingExists &&
+            DetectionFilter::IsTrustedSignedCached(dosPath);
+        if (trustedBacking)
+            continue;
+
+        DetectionFilter::PathClass pathClass = DetectionFilter::ClassifyPath(dosPath);
+        const bool suspiciousPath =
+            pathClass == DetectionFilter::PathClass::TempOrInstaller ||
+            pathClass == DetectionFilter::PathClass::UserProfile ||
+            pathClass == DetectionFilter::PathClass::Removable ||
+            pathClass == DetectionFilter::PathClass::Unmapped ||
+            pathClass == DetectionFilter::PathClass::Unknown;
+        if (!hasPeHeader && !hasActiveThread)
+            continue;
+        if (backingExists && !suspiciousPath && !hasActiveThread && !writeExec)
+            continue;
+
+        std::string detail = "Imagem executavel mapeada do disco fora da lista de modulos: " +
+                             WideToUtf8(dosPath) + " | base=" + HexAddress(allocBase) +
+                             " | backing=" + (backingExists ? std::string("present") : std::string("missing")) +
+                             " | thread=" + (hasActiveThread ? std::string("yes") : std::string("no")) +
+                             " | protect=" + ProtectionToString(mbi.Protect);
+        const std::string severity = (!backingExists || hasActiveThread || writeExec) ? "HIGH" : "MEDIUM";
+        AddEmulatorFinding(out, procName, kTagManualMapping, allocBase, detail, severity);
     }
 }
 
@@ -921,6 +1140,52 @@ static void ScanHiddenMappedDlls(HANDLE process, const std::string& procName,
 // and executable. Private executable pages with PE headers = manual-mapped DLLs
 // that changed their protection after loading (e.g. stripped PE header but left
 // RX executable sections).
+static void ScanProcessImageBacking(HANDLE process, const std::string& procName,
+                                    const std::wstring& executablePath,
+                                    const std::vector<ModuleRange>& modules,
+                                    std::vector<ScannerUI::EmulatorFinding>& out) {
+    if (executablePath.empty() || modules.empty())
+        return;
+
+    const std::wstring expected = ToUpperInvariant(executablePath);
+    const ModuleRange* mainImage = nullptr;
+    for (const auto& module : modules) {
+        if (ToUpperInvariant(module.path) == expected) {
+            mainImage = &module;
+            break;
+        }
+    }
+    if (!mainImage)
+        return;
+
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(mainImage->begin),
+                       &mbi, sizeof(mbi)) != sizeof(mbi))
+        return;
+
+    std::wstring backingPath;
+    const bool hasBacking = QueryMappedImagePath(process, mbi.AllocationBase, backingPath);
+    const bool privateImage = mbi.Type != MEM_IMAGE;
+    const bool pathMismatch = hasBacking && ToUpperInvariant(backingPath) != expected;
+    const bool missingBacking = hasBacking && !FileExistsW(backingPath);
+    if (!privateImage && !pathMismatch && !missingBacking)
+        return;
+
+    const bool trustedAlternate = hasBacking && FileExistsW(backingPath) &&
+                                  DetectionFilter::IsTrustedSignedCached(backingPath);
+    if (!privateImage && pathMismatch && trustedAlternate && !missingBacking)
+        return;
+
+    std::string memoryType = mbi.Type == MEM_IMAGE ? "MEM_IMAGE" :
+                             mbi.Type == MEM_PRIVATE ? "MEM_PRIVATE" : "MEM_MAPPED";
+    std::string detail = "Process image backing inconsistente"
+                         " | expected=" + WideToUtf8(executablePath) +
+                         " | mapped=" + (hasBacking ? WideToUtf8(backingPath) : std::string("unresolved")) +
+                         " | memory_type=" + memoryType +
+                         " | protect=" + ProtectionToString(mbi.Protect);
+    AddEmulatorFinding(out, procName, ScanTag::Hollowing, mainImage->begin, detail, "HIGH");
+}
+
 static void ScanPrivateExecutableWorkingSet(HANDLE process, const std::string& procName,
                                              const std::vector<ModuleRange>& modules,
                                              std::vector<ScannerUI::EmulatorFinding>& out) {
@@ -1267,21 +1532,65 @@ static std::string FormatHandleDuration(ULONGLONG ticks100ns) {
     return oss.str();
 }
 
-static bool IsEmulatorHandleContext(const SecurityHandleEvent& ev) {
-    std::wstring procName = BaseNameFromPath(ev.processName);
-    if (!procName.empty() && IsKnownEmulatorProcess(procName))
-        return true;
+static bool IsHdPlayerHandleContext(const std::wstring& objectName) {
+    // Security 4656/4658 reports ProcessName as the caller/owner of the
+    // handle, not as the target object.  Treating HD-PLAYER.EXE here as the
+    // target caused normal handles created by the emulator to be reported.
+    // The object name must identify HD-Player explicitly.
+    std::wstring objectUpper = ToUpperInvariant(objectName);
+    return objectUpper.find(L"HD-PLAYER.EXE") != std::wstring::npos ||
+           objectUpper.find(L"HD-PLAYER") != std::wstring::npos;
+}
 
-    std::wstring objectUpper = ToUpperInvariant(ev.objectName);
-    static const wchar_t* kNames[] = {
-        L"HD-PLAYER.EXE", L"ANDROIDEMULATOR.EXE", L"ANDROIDPROCESS.EXE",
-        L"MEMU.EXE", L"NOX.EXE", L"DNPLAYER.EXE", L"MUMUPLAYER.EXE",
-        L"BLUESTACKS.EXE", L"BSTMHDANDROID.EXE"
-    };
-    for (const wchar_t* name : kNames) {
-        if (objectUpper.find(name) != std::wstring::npos)
-            return true;
+static bool IsHdPlayerHandleContext(const SecurityHandleEvent& ev) {
+    return IsHdPlayerHandleContext(ev.objectName);
+}
+
+static bool TryParseHexMask(const std::wstring& text, DWORD& mask) {
+    mask = 0;
+    if (text.empty())
+        return false;
+    wchar_t* end = nullptr;
+    unsigned long value = wcstoul(text.c_str(), &end, 0);
+    if (end == text.c_str())
+        return false;
+    mask = static_cast<DWORD>(value);
+    return true;
+}
+
+static bool IsProcessOrThreadObject(const std::wstring& objectType) {
+    const std::wstring type = UpperTrimW(objectType);
+    return type == L"PROCESS" || type == L"THREAD";
+}
+
+static bool IsHdPlayerHighRiskAccess(const std::wstring& objectType,
+                                     const std::wstring& accessMask) {
+    DWORD mask = 0;
+    if (!TryParseHexMask(accessMask, mask))
+        return false;
+
+    constexpr DWORD kMinInterestingMask = 0x000000ff;
+    constexpr DWORD kMaxFocusedMask     = 0x0001ffff;
+    if (mask < kMinInterestingMask || mask > kMaxFocusedMask)
+        return false;
+
+    const std::wstring type = UpperTrimW(objectType);
+    constexpr DWORD kControlRights = WRITE_DAC | WRITE_OWNER | DELETE;
+    if (type == L"PROCESS") {
+        constexpr DWORD kProcessInjectionRights =
+            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD |
+            PROCESS_DUP_HANDLE | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME;
+        return (mask & (kProcessInjectionRights | kControlRights)) != 0;
     }
+
+    if (type == L"THREAD") {
+        constexpr DWORD kThreadControlRights =
+            THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT |
+            THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN |
+            THREAD_IMPERSONATE | THREAD_DIRECT_IMPERSONATION;
+        return (mask & (kThreadControlRights | kControlRights)) != 0;
+    }
+
     return false;
 }
 
@@ -1325,8 +1634,13 @@ static void CollectEmulatorHandleLifetimeFindings(std::vector<ScannerUI::Emulato
                         ev.objectName = ExtractSysmonData(xml, L"ObjectName");
                         ev.objectType = ExtractSysmonData(xml, L"ObjectType");
                         ev.accessMask = ExtractSysmonData(xml, L"AccessMask");
+                        bool hdPlayerOpenHandle =
+                            ev.eventId == 4656 &&
+                            IsHdPlayerHandleContext(ev) &&
+                            IsProcessOrThreadObject(ev.objectType) &&
+                            IsHdPlayerHighRiskAccess(ev.objectType, ev.accessMask);
                         if (ev.handleId != L"-" && ev.processId != L"-" &&
-                            (ev.eventId == 4658 || IsEmulatorHandleContext(ev)))
+                            (ev.eventId == 4658 || hdPlayerOpenHandle))
                             events.push_back(std::move(ev));
                     }
                 }
@@ -1341,12 +1655,17 @@ static void CollectEmulatorHandleLifetimeFindings(std::vector<ScannerUI::Emulato
 
     std::unordered_map<std::wstring, OpenSecurityHandle> openHandles;
     std::unordered_set<std::wstring> reported;
-    constexpr ULONGLONG kMinOpenTime = 5ULL * 60ULL * 10000000ULL;
+    std::unordered_set<std::string> reportedSignature;
     size_t emitted = 0;
 
     for (const auto& ev : events) {
         std::wstring key = ev.processId + L":" + ev.handleId;
         if (ev.eventId == 4656) {
+            if (!IsHdPlayerHandleContext(ev) ||
+                !IsProcessOrThreadObject(ev.objectType) ||
+                !IsHdPlayerHighRiskAccess(ev.objectType, ev.accessMask)) {
+                continue;
+            }
             OpenSecurityHandle open;
             open.time = ev.time;
             open.fileTime = ev.fileTime;
@@ -1366,7 +1685,16 @@ static void CollectEmulatorHandleLifetimeFindings(std::vector<ScannerUI::Emulato
             continue;
 
         const OpenSecurityHandle& open = it->second;
-        if (ev.time > open.time && ev.time - open.time >= kMinOpenTime) {
+        bool focusedHdPlayerHandle =
+            IsHdPlayerHandleContext(ev) ||
+            IsHdPlayerHandleContext(open.objectName);
+        if (!focusedHdPlayerHandle ||
+            !IsProcessOrThreadObject(open.objectType) ||
+            !IsHdPlayerHighRiskAccess(open.objectType, open.accessMask)) {
+            openHandles.erase(it);
+            continue;
+        }
+        if (ev.time > open.time) {
             std::wstring reportKey = key + L":" + std::to_wstring(open.time) + L":" + std::to_wstring(ev.time);
             if (reported.insert(reportKey).second) {
                 std::string source = WideToUtf8(open.processName.empty() ? ev.processName : open.processName);
@@ -1379,23 +1707,124 @@ static void CollectEmulatorHandleLifetimeFindings(std::vector<ScannerUI::Emulato
                 if (objectType.empty()) objectType = "-";
                 if (access.empty()) access = "-";
 
+                // One alert per source/type/access keeps repeated audit entries
+                // from flooding the UI while preserving the first handle as evidence.
+                const std::string signature = source + "|" + objectType + "|" + access;
+                if (!reportedSignature.insert(signature).second) {
+                    openHandles.erase(it);
+                    continue;
+                }
+
                 std::string detail =
-                    "handle aberto por " + FormatHandleDuration(ev.time - open.time) +
-                    " e encerrado | opened=" + FormatLocalFileTime(open.fileTime) +
+                    "handle de " + objectType +
+                    " com acesso alto foi fechado apos " + FormatHandleDuration(ev.time - open.time) +
+                    " | opened=" + FormatLocalFileTime(open.fileTime) +
                     " | closed=" + FormatLocalFileTime(ev.fileTime) +
                     " | source=" + source +
                     " | object=" + target +
                     " | type=" + objectType +
                     " | access=" + access +
                     " | handle=" + WideToUtf8(ev.handleId);
+                detail += " | evidence=Security 4656->4658, HD-Player, mask 0xff..0x1ffff";
 
-                AddEmulatorFinding(out, "Security Object Access", ScanTag::Handle,
-                                   0, detail, "MEDIUM");
+                AddEmulatorFinding(out, source, "INTERNAL DETECTADO",
+                                   0, detail, "HIGH");
                 if (++emitted >= 80 || out.size() >= ScanLimits::kMaxSysmemFindings)
                     break;
             }
         }
         openHandles.erase(it);
+    }
+}
+
+static std::string FindCleanerTokenAscii(const uint8_t* data, size_t len) {
+    if (!data || len == 0)
+        return {};
+
+    std::string hay;
+    hay.reserve(len);
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = data[i];
+        hay.push_back((c >= 0x20 && c <= 0x7e) ? static_cast<char>(tolower(c)) : ' ');
+    }
+
+    static const char* kTokens[] = {
+        "prefetch", "hd-player.exe", "hd-player", "bam", "usn", "journal",
+        "eventlog", "wevtutil", "clear-eventlog", "fsutil usn",
+        "pcasvc", "dps", "diagtrack", "sysmain", "shimcache",
+        "amcache", "cleaner", "clean", "clear", "delete", "sdelete",
+        "journaldelete", "deletejournal", "handle", "hook", "stream",
+        nullptr
+    };
+    for (int i = 0; kTokens[i]; ++i) {
+        if (hay.find(kTokens[i]) != std::string::npos)
+            return kTokens[i];
+    }
+    return {};
+}
+
+static void ScanHdPlayerLowWritableRange(HANDLE process, const std::string& procName,
+                                         std::vector<ScannerUI::EmulatorFinding>& out) {
+    constexpr uintptr_t kScanStart = 0x000000ff;
+    constexpr uintptr_t kScanEnd   = 0x0001ffff;
+    constexpr SIZE_T kMaxRead = 32 * 1024;
+
+    uintptr_t addr = kScanStart;
+    std::unordered_set<uintptr_t> seenAllocBases;
+    std::vector<uint8_t> buffer(kMaxRead);
+
+    while (addr < kScanEnd && out.size() < ScanLimits::kMaxSysmemFindings) {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) != sizeof(mbi))
+            break;
+
+        uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        uintptr_t next = base + mbi.RegionSize;
+        if (next <= addr)
+            break;
+        addr = next;
+
+        uintptr_t regionEnd = next < kScanEnd ? next : kScanEnd;
+        if (regionEnd <= kScanStart)
+            continue;
+
+        if (mbi.State != MEM_COMMIT)
+            continue;
+        if (!IsWritableOrWriteExecuteProtection(mbi.Protect))
+            continue;
+
+        uintptr_t allocBase = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
+        if (!seenAllocBases.insert(allocBase).second)
+            continue;
+
+        uintptr_t readBase = base < kScanStart ? kScanStart : base;
+        SIZE_T toRead = static_cast<SIZE_T>(regionEnd - readBase);
+        if (toRead > kMaxRead)
+            toRead = kMaxRead;
+        if (toRead < 8)
+            continue;
+
+        SIZE_T got = 0;
+        bool readable = ReadProcessMemory(process, reinterpret_cast<LPCVOID>(readBase),
+                                          buffer.data(), toRead, &got) && got >= 8;
+        std::string token = readable ? FindCleanerTokenAscii(buffer.data(), got) : std::string();
+
+        bool writeExec = IsWriteExecuteProtection(mbi.Protect);
+        if (!writeExec && token.empty())
+            continue;
+
+        std::string detail = "HD-Player low memory range 0xff..0x1ffff";
+        detail += " | region=" + HexAddress(base) + "-" + HexAddress(regionEnd);
+        detail += " | alloc=" + HexAddress(allocBase);
+        detail += " | protect=" + ProtectionToString(mbi.Protect);
+        detail += " | readable=" + std::string(readable ? "yes" : "no");
+        if (!token.empty())
+            detail += " | cleaner_or_hook_string=" + token;
+
+        AddEmulatorFinding(out, procName,
+                           writeExec ? kTagMemoryInject : kTagMemoryProtect,
+                           allocBase, detail,
+                           writeExec || !token.empty() ? "HIGH" : "MEDIUM");
     }
 }
 
@@ -1424,17 +1853,24 @@ std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings() {
                             DetectionFilter::IsTrustedDir(DetectionFilter::ClassifyPath(exePathW));
         std::vector<ModuleRange> modules;
         if (CollectProcessModules(process, modules)) {
+            auto threadBases = CollectThreadAllocBases(pid, process, modules);
             // Collect graphics hook destinations first — used to tag injected threads/memory
             // as confirmed OpenGL/gfx chams rather than generic injection.
             auto gfxDests = CollectGfxHookDestBases(process, modules);
             const std::unordered_set<uintptr_t>* pGfxDests = gfxDests.empty() ? nullptr : &gfxDests;
 
             ScanUnsignedModules(process, nameWithPid, modules, installDir, exePathW, findings);
-            ScanExecutablePrivateMemory(process, nameWithPid, modules, findings, nullptr, isEmuRuntime, false, false, pGfxDests);
-            ScanThreadStartAddresses(pid, nameWithPid, process, modules, findings, isEmuRuntime, false, false, pGfxDests);
+            ScanExecutablePrivateMemory(process, nameWithPid, modules, findings, &threadBases,
+                                        isEmuRuntime, true, true, pGfxDests);
+            ScanThreadStartAddresses(pid, nameWithPid, process, modules, findings,
+                                     isEmuRuntime, true, true, pGfxDests);
+            if (IsHdPlayerProcess(nameW))
+                ScanHdPlayerLowWritableRange(process, nameWithPid, findings);
             // Advanced detections (only for emulator PIDs — expensive)
-            ScanHiddenMappedDlls(process, nameWithPid, modules, findings);
+            ScanHiddenMappedDlls(process, nameWithPid, modules, findings, &threadBases);
             ScanPrivateExecutableWorkingSet(process, nameWithPid, modules, findings);
+            ScanAnomalousModuleProtections(process, nameWithPid, modules, findings, pGfxDests);
+            ScanLoadedModuleAnomalies(process, nameWithPid, modules, findings);
             ScanHiddenThreadsViaKernel(pid, nameWithPid, process, modules, findings, isEmuRuntime, pGfxDests);
         }
 
@@ -1443,7 +1879,26 @@ std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings() {
 
     CollectEmulatorHandleLifetimeFindings(findings);
 
-    return findings;
+    std::vector<ScannerUI::EmulatorFinding> merged;
+    std::unordered_map<std::string, size_t> byTarget;
+    merged.reserve(findings.size());
+    for (const auto& finding : findings) {
+        const std::string key = finding.process + "\n" + finding.type + "\n" + finding.address;
+        auto it = byTarget.find(key);
+        if (it == byTarget.end()) {
+            byTarget.emplace(key, merged.size());
+            merged.push_back(finding);
+            continue;
+        }
+
+        auto& existing = merged[it->second];
+        if (DetectionFilter::SeverityRank(finding.severity) <
+            DetectionFilter::SeverityRank(existing.severity))
+            existing.severity = finding.severity;
+        if (existing.detail.find(finding.detail) == std::string::npos)
+            existing.detail += " | " + finding.detail;
+    }
+    return merged;
 }
 
 // P7 — Direct syscall stub pattern matching.
@@ -1570,8 +2025,10 @@ static void ScanDirectSyscalls(HANDLE process, const std::string& procName,
     std::vector<uint8_t> buf(kMaxRead);
     std::unordered_set<uintptr_t> seenAllocBases;
     uintptr_t addr = 0;
+    size_t paceCounter = 0;
 
     while (addr < kSyscallScanLimit && out.size() < ScanLimits::kMaxSyscallDetections) {
+        MaybePaceIteration(paceCounter, 48);
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
@@ -1691,8 +2148,10 @@ static void ScanSuspiciousStringsInMemory(
     std::vector<uint8_t> buf(kMaxRead);
     std::unordered_set<uintptr_t> seen;
     uintptr_t addr = 0;
+    size_t paceCounter = 0;
 
     while (addr < kLimit && out.size() < ScanLimits::kMaxSysmemFindings) {
+        MaybePaceIteration(paceCounter, 48);
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
@@ -1745,7 +2204,17 @@ static void ScanSuspiciousStringsInMemory(
     }
 }
 
-std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string& status) {
+// Defined further below (after HasSuspiciousProcessToken/IsKnownDeveloperToolProcess/
+// IsBenignUserLaunchPath, which it depends on). Evaluates the same process-name and
+// temp/user-profile-unsigned-packed heuristics that used to live in the now-removed,
+// separately-enumerating CollectSuspiciousProcesses pass.
+static void EvaluateSuspiciousProcessHeuristics(DWORD pid, const std::wstring& rawExeName,
+                                                const std::wstring& fullPath, bool signedOk,
+                                                DetectionFilter::PathClass cls,
+                                                std::vector<ScannerUI::EmulatorFinding>& out);
+
+std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
+    std::string& status, std::vector<ScannerUI::EmulatorFinding>& suspiciousProcessFindings) {
     std::vector<ScannerUI::EmulatorFinding> findings;
     DWORD ownPid = GetCurrentProcessId();
 
@@ -1757,6 +2226,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
 
     PROCESSENTRY32W entry = {};
     entry.dwSize = sizeof(entry);
+    size_t paceCounter = 0;
     if (Process32FirstW(snapshot, &entry)) {
         do {
             if (findings.size() >= ScanLimits::kMaxSysmemFindings)
@@ -1768,23 +2238,29 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
             // sao alvos comuns de injecao — o ClassifyExecRegion ainda descarta regioes JIT
             // legitimas por conteudo (entropia + tamanho), nao por nome de processo.
 
+            // Computed unconditionally (not gated on OpenProcess below) so a process that
+            // can't be opened with PROCESS_VM_READ (protected/PPL processes, or one that
+            // exited mid-scan) still gets the lightweight suspicious-process heuristics —
+            // matching what the old, separately-enumerating CollectSuspiciousProcesses
+            // pass used to do for every PID regardless of whether a memory scan was possible.
+            std::wstring imagePath = ProcessFullPathW(pid);
+            DetectionFilter::PathClass cls = imagePath.empty()
+                ? DetectionFilter::PathClass::Unknown
+                : DetectionFilter::ClassifyPath(imagePath);
+            bool signedOk = !imagePath.empty() && DetectionFilter::IsTrustedSignedCached(imagePath);
+            EvaluateSuspiciousProcessHeuristics(pid, entry.szExeFile, imagePath, signedOk, cls,
+                                                 suspiciousProcessFindings);
+
             HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
             if (!process)
                 process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
             if (!process)
                 continue;
 
-            bool systemTrustedProcess = false;
-            bool programFilesSigned   = false;
-            std::wstring imagePath = ProcessFullPathW(pid);
-            if (!imagePath.empty()) {
-                DetectionFilter::PathClass cls = DetectionFilter::ClassifyPath(imagePath);
-                systemTrustedProcess = cls == DetectionFilter::PathClass::SystemTrusted;
-                // Signed binaries in ProgramFiles (IDEs, game clients, tools) generate
-                // TartarusGate-like patterns from profilers/trampolines; skip syscall scan.
-                if (cls == DetectionFilter::PathClass::ProgramFiles)
-                    programFilesSigned = DetectionFilter::IsTrustedSignedCached(imagePath);
-            }
+            bool systemTrustedProcess = cls == DetectionFilter::PathClass::SystemTrusted;
+            // Signed binaries in ProgramFiles (IDEs, game clients, tools) generate
+            // TartarusGate-like patterns from profilers/trampolines; skip syscall scan.
+            bool programFilesSigned = (cls == DetectionFilter::PathClass::ProgramFiles) && signedOk;
 
             DWORD64 procScanStart = GetTickCount64();
             std::string procName = WideToUtf8(entry.szExeFile) + " [" + std::to_string(pid) + "]";
@@ -1804,6 +2280,12 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
                 const std::unordered_set<uintptr_t>* pGfxDests = gfxDests.empty() ? nullptr : &gfxDests;
 
                 ScanExecutablePrivateMemory(process, procName, modules, perProcess, &threadBases, isEmuRuntime, true, true, pGfxDests);
+                if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
+                    ScanProcessImageBacking(process, procName, imagePath, modules, perProcess);
+                }
+                if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
+                    ScanHiddenMappedDlls(process, procName, modules, perProcess, &threadBases);
+                }
                 // Mudanca 2: thread scan agora roda em TODOS os processos, incluindo sistema.
                 // Thread fora de modulo em lsass/svchost/csrss = indicador critico de injecao.
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
@@ -1815,7 +2297,6 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanAnomalousModuleProtections(process, procName, modules, perProcess, pGfxDests);
                 }
-                size_t findingsBeforeStructural = perProcess.size();
                 // Mudanca 4: analise estrutural de modulos carregados (PE anomalias)
                 if (GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
                     ScanLoadedModuleAnomalies(process, procName, modules, perProcess);
@@ -1823,9 +2304,14 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
                 // M1 override: se as varreduras estruturais ja flagaram em processo trusted,
                 // o processo virou suspeito — roda os scans caros (handles/syscalls/strings)
                 // mesmo nele para investigar a payload. Para processos limpos, gate mantido.
-                bool suspectedInjection = perProcess.size() > findingsBeforeStructural;
+                bool suspectedInjection = !perProcess.empty();
                 bool deepScanGate    = !systemTrustedProcess || suspectedInjection;
                 bool deepCostlyGate  = (!systemTrustedProcess && !programFilesSigned) || suspectedInjection;
+                if (suspectedInjection &&
+                    GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
+                    ScanHiddenThreadsViaKernel(pid, procName, process, modules, perProcess,
+                                               isEmuRuntime, pGfxDests);
+                }
                 // Mudanca 5: handles intra-processo com direitos de injecao
                 if (deepScanGate &&
                     GetTickCount64() - procScanStart < ScanLimits::kProcessScanTimeoutMs) {
@@ -1849,6 +2335,7 @@ std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string&
                 }
             }
             CloseHandle(process);
+            MaybePaceIteration(paceCounter, 6);
         } while (Process32NextW(snapshot, &entry));
     }
 
@@ -1911,249 +2398,169 @@ static bool IsBenignUserLaunchPath(const std::wstring& path) {
            up.find(L"\\PROJECTS\\") != std::wstring::npos;
 }
 
-std::vector<ScannerUI::EmulatorFinding> CollectSuspiciousProcesses(std::string& status) {
+// P4 — DKOM: cross-check Toolhelp vs NtQuerySystemInformation for hidden processes
+// and hidden threads. Extracted out of CollectSuspiciousProcesses (which used to run
+// this inline) so it can be called on its own, independent of the process-name/entropy
+// heuristics below — the two checks are unrelated and only used to share a function
+// for historical reasons.
+std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies() {
     std::vector<ScannerUI::EmulatorFinding> findings;
 
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        status = "REVIEW";
-        return findings;
-    }
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    NtQuerySystemInformationFn NtQuerySysInfo = ntdll
+        ? reinterpret_cast<NtQuerySystemInformationFn>(
+            GetProcAddress(ntdll, "NtQuerySystemInformation"))
+        : nullptr;
 
-    PROCESSENTRY32W entry = {};
-    entry.dwSize = sizeof(entry);
-    if (!Process32FirstW(snapshot, &entry)) {
-        CloseHandle(snapshot);
-        status = "OK";
-        return findings;
-    }
+    if (NtQuerySysInfo) {
+        ULONG needed = 0;
+        NtQuerySysInfo(5, nullptr, 0, &needed);
+        if (needed < 64) needed = 2 * 1024 * 1024;
+        std::vector<uint8_t> buf(needed + 4096);
+        LONG st = NtQuerySysInfo(5, buf.data(), (ULONG)buf.size(), &needed);
+        if (st >= 0) {
+            std::unordered_set<DWORD> ntPids;
+            size_t off = 0;
+            while (off + 8 <= buf.size()) {
+                ULONG next = *reinterpret_cast<const ULONG*>(buf.data() + off);
+                size_t pidOff = off + (sizeof(void*) == 8 ? 0x50 : 0x44);
+                if (pidOff + sizeof(ULONG_PTR) <= buf.size()) {
+                    DWORD pid = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf.data() + pidOff);
+                    if (pid != 0) ntPids.insert(pid);
+                }
+                if (!next) break;
+                off += next;
+                if (off >= buf.size()) break;
+            }
 
-    DWORD selfPid = GetCurrentProcessId();
-    do {
-        if (entry.th32ProcessID == 0 || entry.th32ProcessID == 4 ||
-            entry.th32ProcessID == selfPid)
-            continue;
+            HANDLE snap3 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap3 != INVALID_HANDLE_VALUE) {
+                std::unordered_set<DWORD> win32Pids;
+                PROCESSENTRY32W e3 = {}; e3.dwSize = sizeof(e3);
+                if (Process32FirstW(snap3, &e3)) {
+                    do { win32Pids.insert(e3.th32ProcessID); }
+                    while (Process32NextW(snap3, &e3));
+                }
+                CloseHandle(snap3);
 
-        std::wstring procName = entry.szExeFile;
-        bool nameMatch = HasSuspiciousProcessToken(procName);
-
-
-        std::wstring fullPath = ProcessFullPathW(entry.th32ProcessID);
-        bool signedOk = !fullPath.empty() && IsAuthenticodeSigned(fullPath);
-        DetectionFilter::PathClass cls = fullPath.empty() ?
-            DetectionFilter::PathClass::Unknown :
-            DetectionFilter::ClassifyPath(fullPath);
-        bool tempOrInstallerPath = cls == DetectionFilter::PathClass::TempOrInstaller;
-        bool userProfilePath = cls == DetectionFilter::PathClass::UserProfile;
-
-
-        if (nameMatch) {
-            ScannerUI::EmulatorFinding f;
-            f.process = WideToUtf8(procName);
-            f.type = kTagMapper;
-            f.address = "PID:" + std::to_string(entry.th32ProcessID);
-            f.detail = "name=blacklisted | signed=" + std::string(signedOk ? "yes" : "no") +
-                       " | path=" + WideToUtf8(fullPath.empty() ? L"unknown" : fullPath);
-            f.severity = "HIGH";
-            findings.push_back(f);
-            continue;
-        }
-
-
-        if (!signedOk && !fullPath.empty() && tempOrInstallerPath &&
-            !IsKnownDeveloperToolProcess(procName)) {
-            double entropy = DetectionFilter::FileEntropySample(fullPath);
-            bool packed = entropy >= DetectionFilter::kPackedEntropy;
-            if (!packed)
-                continue;
-            ScannerUI::EmulatorFinding f;
-            f.process = WideToUtf8(procName);
-            f.type = kTagMapper;
-            f.address = "PID:" + std::to_string(entry.th32ProcessID);
-            f.detail = "unsigned packed process in temp/installer path | entropy=" +
-                       DetectionFilter::EntropyToStr(entropy) +
-                       " | path=" + WideToUtf8(fullPath);
-            f.severity = "MEDIUM";
-            findings.push_back(f);
-        } else if (!signedOk && !fullPath.empty() && userProfilePath &&
-                   !IsBenignUserLaunchPath(fullPath) &&
-                   !IsKnownDeveloperToolProcess(procName)) {
-            double entropy = DetectionFilter::FileEntropySample(fullPath);
-            bool packed = entropy >= DetectionFilter::kPackedEntropy;
-            if (!packed)
-                continue;
-            ScannerUI::EmulatorFinding f;
-            f.process = WideToUtf8(procName);
-            f.type = kTagMapper;
-            f.address = "PID:" + std::to_string(entry.th32ProcessID);
-            f.detail = "unsigned packed process in user profile path | entropy=" +
-                       DetectionFilter::EntropyToStr(entropy) +
-                       " | path=" + WideToUtf8(fullPath);
-            f.severity = "MEDIUM";
-            findings.push_back(f);
-        }
-    } while (Process32NextW(snapshot, &entry));
-
-    CloseHandle(snapshot);
-
-    // P4 — DKOM: cross-check Toolhelp vs NtQuerySystemInformation for hidden processes
-    {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        NtQuerySystemInformationFn NtQuerySysInfo = ntdll
-            ? reinterpret_cast<NtQuerySystemInformationFn>(
-                GetProcAddress(ntdll, "NtQuerySystemInformation"))
-            : nullptr;
-
-        if (NtQuerySysInfo) {
-            ULONG needed = 0;
-            NtQuerySysInfo(5, nullptr, 0, &needed);
-            if (needed < 64) needed = 2 * 1024 * 1024;
-            std::vector<uint8_t> buf(needed + 4096);
-            LONG st = NtQuerySysInfo(5, buf.data(), (ULONG)buf.size(), &needed);
-            if (st >= 0) {
-                std::unordered_set<DWORD> ntPids;
-                size_t off = 0;
-                while (off + 8 <= buf.size()) {
-                    ULONG next = *reinterpret_cast<const ULONG*>(buf.data() + off);
-                    size_t pidOff = off + (sizeof(void*) == 8 ? 0x50 : 0x44);
-                    if (pidOff + sizeof(ULONG_PTR) <= buf.size()) {
-                        DWORD pid = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf.data() + pidOff);
-                        if (pid != 0) ntPids.insert(pid);
+                for (DWORD pid : ntPids) {
+                    if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) continue;
+                    if (win32Pids.find(pid) == win32Pids.end()) {
+                        ScannerUI::EmulatorFinding f;
+                        f.process  = "PID:" + std::to_string(pid);
+                        f.type     = kTagMemoryProtect;
+                        f.address  = "PID:" + std::to_string(pid);
+                        f.detail   = "process visible in NtQuerySystemInformation but hidden from Toolhelp (DKOM)";
+                        f.severity = "HIGH";
+                        findings.push_back(f);
                     }
-                    if (!next) break;
-                    off += next;
-                    if (off >= buf.size()) break;
                 }
 
-                HANDLE snap3 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                if (snap3 != INVALID_HANDLE_VALUE) {
-                    std::unordered_set<DWORD> win32Pids;
-                    PROCESSENTRY32W e3 = {}; e3.dwSize = sizeof(e3);
-                    if (Process32FirstW(snap3, &e3)) {
-                        do { win32Pids.insert(e3.th32ProcessID); }
-                        while (Process32NextW(snap3, &e3));
-                    }
-                    CloseHandle(snap3);
-
-                    for (DWORD pid : ntPids) {
-                        if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) continue;
-                        if (win32Pids.find(pid) == win32Pids.end()) {
-                            ScannerUI::EmulatorFinding f;
-                            f.process  = "PID:" + std::to_string(pid);
-                            f.type     = kTagMemoryProtect;
-                            f.address  = "PID:" + std::to_string(pid);
-                            f.detail   = "process visible in NtQuerySystemInformation but hidden from Toolhelp (DKOM)";
-                            f.severity = "HIGH";
-                            findings.push_back(f);
+                // Thread count divergence: Toolhelp thread count vs NtQuerySystemInformation
+                // A higher thread count in NT than in Toolhelp = hidden threads (DKOM on threads)
+                {
+                    // Build map: pid -> NT thread count from the buffer we already have
+                    std::unordered_map<DWORD, DWORD> ntThreadCounts;
+                    size_t off2 = 0;
+                    while (off2 + 8 <= buf.size()) {
+                        ULONG next = *reinterpret_cast<const ULONG*>(buf.data() + off2);
+                        size_t pidOff  = off2 + (sizeof(void*) == 8 ? 0x50 : 0x44);
+                        size_t tcntOff = off2 + (sizeof(void*) == 8 ? 0x28 : 0x24);
+                        if (pidOff  + sizeof(ULONG_PTR) <= buf.size() &&
+                            tcntOff + sizeof(ULONG) <= buf.size()) {
+                            DWORD pid = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf.data() + pidOff);
+                            DWORD cnt = *reinterpret_cast<const ULONG*>(buf.data() + tcntOff);
+                            if (pid != 0) ntThreadCounts[pid] = cnt;
                         }
+                        if (!next) break;
+                        off2 += next;
+                        if (off2 >= buf.size()) break;
                     }
 
-                    // Thread count divergence: Toolhelp thread count vs NtQuerySystemInformation
-                    // A higher thread count in NT than in Toolhelp = hidden threads (DKOM on threads)
-                    {
-                        // Build map: pid -> NT thread count from the buffer we already have
-                        std::unordered_map<DWORD, DWORD> ntThreadCounts;
-                        size_t off2 = 0;
-                        while (off2 + 8 <= buf.size()) {
-                            ULONG next = *reinterpret_cast<const ULONG*>(buf.data() + off2);
-                            size_t pidOff  = off2 + (sizeof(void*) == 8 ? 0x50 : 0x44);
-                            size_t tcntOff = off2 + (sizeof(void*) == 8 ? 0x28 : 0x24);
-                            if (pidOff  + sizeof(ULONG_PTR) <= buf.size() &&
-                                tcntOff + sizeof(ULONG) <= buf.size()) {
-                                DWORD pid = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf.data() + pidOff);
-                                DWORD cnt = *reinterpret_cast<const ULONG*>(buf.data() + tcntOff);
-                                if (pid != 0) ntThreadCounts[pid] = cnt;
-                            }
-                            if (!next) break;
-                            off2 += next;
-                            if (off2 >= buf.size()) break;
+                    // First pass: compare against Toolhelp snapshot and collect candidates.
+                    // We do not flag yet — a single measurement can diverge due to threads
+                    // being born or dying between the two independent snapshot calls.
+                    HANDLE snapT = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                    if (snapT != INVALID_HANDLE_VALUE) {
+                        std::unordered_map<DWORD, DWORD> th32ThreadCounts;
+                        THREADENTRY32 te = {}; te.dwSize = sizeof(te);
+                        if (Thread32First(snapT, &te)) {
+                            do { th32ThreadCounts[te.th32OwnerProcessID]++; }
+                            while (Thread32Next(snapT, &te));
+                        }
+                        CloseHandle(snapT);
+
+                        std::unordered_set<DWORD> candidatePids;
+                        for (const auto& kv : ntThreadCounts) {
+                            DWORD pid   = kv.first;
+                            DWORD ntCnt = kv.second;
+                            if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) continue;
+                            // Processes with very high thread counts have too much variance
+                            // between snapshots to produce a reliable divergence signal.
+                            if (ntCnt > 200) continue;
+                            auto it = th32ThreadCounts.find(pid);
+                            DWORD th32Cnt = (it != th32ThreadCounts.end()) ? it->second : 0;
+                            // Require 4+ more threads in NT than Toolhelp to flag.
+                            // A delta of 1-3 is within normal timing variance between the
+                            // two snapshot APIs (threads can be born/die between calls).
+                            if (ntCnt > th32Cnt + 3)
+                                candidatePids.insert(pid);
                         }
 
-                        // First pass: compare against Toolhelp snapshot and collect candidates.
-                        // We do not flag yet — a single measurement can diverge due to threads
-                        // being born or dying between the two independent snapshot calls.
-                        HANDLE snapT = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-                        if (snapT != INVALID_HANDLE_VALUE) {
-                            std::unordered_map<DWORD, DWORD> th32ThreadCounts;
-                            THREADENTRY32 te = {}; te.dwSize = sizeof(te);
-                            if (Thread32First(snapT, &te)) {
-                                do { th32ThreadCounts[te.th32OwnerProcessID]++; }
-                                while (Thread32Next(snapT, &te));
-                            }
-                            CloseHandle(snapT);
-
-                            std::unordered_set<DWORD> candidatePids;
-                            for (const auto& kv : ntThreadCounts) {
-                                DWORD pid   = kv.first;
-                                DWORD ntCnt = kv.second;
-                                if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) continue;
-                                // Processes with very high thread counts have too much variance
-                                // between snapshots to produce a reliable divergence signal.
-                                if (ntCnt > 200) continue;
-                                auto it = th32ThreadCounts.find(pid);
-                                DWORD th32Cnt = (it != th32ThreadCounts.end()) ? it->second : 0;
-                                // Require 4+ more threads in NT than Toolhelp to flag.
-                                // A delta of 1-3 is within normal timing variance between the
-                                // two snapshot APIs (threads can be born/die between calls).
-                                if (ntCnt > th32Cnt + 3)
-                                    candidatePids.insert(pid);
-                            }
-
-                            // Second pass: re-measure after 80 ms and only flag PIDs that
-                            // still show divergence — eliminates transient timing artifacts.
-                            if (!candidatePids.empty()) {
-                                Sleep(80);
-                                ULONG needed2 = 0;
-                                NtQuerySysInfo(5, nullptr, 0, &needed2);
-                                if (needed2 < 64) needed2 = 2 * 1024 * 1024;
-                                std::vector<uint8_t> buf2(needed2 + 4096);
-                                LONG st2 = NtQuerySysInfo(5, buf2.data(), (ULONG)buf2.size(), &needed2);
-                                if (st2 >= 0) {
-                                    std::unordered_map<DWORD, DWORD> ntThreadCounts2;
-                                    size_t off3 = 0;
-                                    while (off3 + 8 <= buf2.size()) {
-                                        ULONG next3 = *reinterpret_cast<const ULONG*>(buf2.data() + off3);
-                                        size_t pidOff3  = off3 + (sizeof(void*) == 8 ? 0x50 : 0x44);
-                                        size_t tcntOff3 = off3 + (sizeof(void*) == 8 ? 0x28 : 0x24);
-                                        if (pidOff3  + sizeof(ULONG_PTR) <= buf2.size() &&
-                                            tcntOff3 + sizeof(ULONG)    <= buf2.size()) {
-                                            DWORD pid3 = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf2.data() + pidOff3);
-                                            DWORD cnt3 = *reinterpret_cast<const ULONG*>(buf2.data() + tcntOff3);
-                                            if (pid3 != 0) ntThreadCounts2[pid3] = cnt3;
-                                        }
-                                        if (!next3) break;
-                                        off3 += next3;
-                                        if (off3 >= buf2.size()) break;
+                        // Second pass: re-measure after 80 ms and only flag PIDs that
+                        // still show divergence — eliminates transient timing artifacts.
+                        if (!candidatePids.empty()) {
+                            Sleep(80);
+                            ULONG needed2 = 0;
+                            NtQuerySysInfo(5, nullptr, 0, &needed2);
+                            if (needed2 < 64) needed2 = 2 * 1024 * 1024;
+                            std::vector<uint8_t> buf2(needed2 + 4096);
+                            LONG st2 = NtQuerySysInfo(5, buf2.data(), (ULONG)buf2.size(), &needed2);
+                            if (st2 >= 0) {
+                                std::unordered_map<DWORD, DWORD> ntThreadCounts2;
+                                size_t off3 = 0;
+                                while (off3 + 8 <= buf2.size()) {
+                                    ULONG next3 = *reinterpret_cast<const ULONG*>(buf2.data() + off3);
+                                    size_t pidOff3  = off3 + (sizeof(void*) == 8 ? 0x50 : 0x44);
+                                    size_t tcntOff3 = off3 + (sizeof(void*) == 8 ? 0x28 : 0x24);
+                                    if (pidOff3  + sizeof(ULONG_PTR) <= buf2.size() &&
+                                        tcntOff3 + sizeof(ULONG)    <= buf2.size()) {
+                                        DWORD pid3 = (DWORD)*reinterpret_cast<const ULONG_PTR*>(buf2.data() + pidOff3);
+                                        DWORD cnt3 = *reinterpret_cast<const ULONG*>(buf2.data() + tcntOff3);
+                                        if (pid3 != 0) ntThreadCounts2[pid3] = cnt3;
                                     }
+                                    if (!next3) break;
+                                    off3 += next3;
+                                    if (off3 >= buf2.size()) break;
+                                }
 
-                                    std::unordered_map<DWORD, DWORD> th32ThreadCounts2;
-                                    HANDLE snapT2 = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-                                    if (snapT2 != INVALID_HANDLE_VALUE) {
-                                        THREADENTRY32 te2 = {}; te2.dwSize = sizeof(te2);
-                                        if (Thread32First(snapT2, &te2)) {
-                                            do { th32ThreadCounts2[te2.th32OwnerProcessID]++; }
-                                            while (Thread32Next(snapT2, &te2));
-                                        }
-                                        CloseHandle(snapT2);
+                                std::unordered_map<DWORD, DWORD> th32ThreadCounts2;
+                                HANDLE snapT2 = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                                if (snapT2 != INVALID_HANDLE_VALUE) {
+                                    THREADENTRY32 te2 = {}; te2.dwSize = sizeof(te2);
+                                    if (Thread32First(snapT2, &te2)) {
+                                        do { th32ThreadCounts2[te2.th32OwnerProcessID]++; }
+                                        while (Thread32Next(snapT2, &te2));
+                                    }
+                                    CloseHandle(snapT2);
 
-                                        for (DWORD pid : candidatePids) {
-                                            auto ntIt2 = ntThreadCounts2.find(pid);
-                                            if (ntIt2 == ntThreadCounts2.end()) continue;
-                                            DWORD ntCnt2 = ntIt2->second;
-                                            if (ntCnt2 > 200) continue;
-                                            auto thIt2 = th32ThreadCounts2.find(pid);
-                                            DWORD th32Cnt2 = (thIt2 != th32ThreadCounts2.end()) ? thIt2->second : 0;
-                                            if (ntCnt2 > th32Cnt2 + 3) {
-                                                ScannerUI::EmulatorFinding f;
-                                                f.process  = "PID:" + std::to_string(pid);
-                                                f.type     = kTagMemoryProtect;
-                                                f.address  = "PID:" + std::to_string(pid);
-                                                f.detail   = "thread count divergence: NT=" + std::to_string(ntCnt2) +
-                                                             " Toolhelp=" + std::to_string(th32Cnt2) +
-                                                             " | possible hidden threads (DKOM)";
-                                                f.severity = "HIGH";
-                                                findings.push_back(f);
-                                            }
+                                    for (DWORD pid : candidatePids) {
+                                        auto ntIt2 = ntThreadCounts2.find(pid);
+                                        if (ntIt2 == ntThreadCounts2.end()) continue;
+                                        DWORD ntCnt2 = ntIt2->second;
+                                        if (ntCnt2 > 200) continue;
+                                        auto thIt2 = th32ThreadCounts2.find(pid);
+                                        DWORD th32Cnt2 = (thIt2 != th32ThreadCounts2.end()) ? thIt2->second : 0;
+                                        if (ntCnt2 > th32Cnt2 + 3) {
+                                            ScannerUI::EmulatorFinding f;
+                                            f.process  = "PID:" + std::to_string(pid);
+                                            f.type     = kTagMemoryProtect;
+                                            f.address  = "PID:" + std::to_string(pid);
+                                            f.detail   = "thread count divergence: NT=" + std::to_string(ntCnt2) +
+                                                         " Toolhelp=" + std::to_string(th32Cnt2) +
+                                                         " | possible hidden threads (DKOM)";
+                                            f.severity = "HIGH";
+                                            findings.push_back(f);
                                         }
                                     }
                                 }
@@ -2165,6 +2572,67 @@ std::vector<ScannerUI::EmulatorFinding> CollectSuspiciousProcesses(std::string& 
         }
     }
 
-    status = findings.empty() ? "OK" : "DETECTED";
     return findings;
+}
+
+// Suspicious-process heuristics: blacklisted name, or unsigned+packed executable
+// launched from a temp/installer or user-profile path. Used to live in its own
+// CollectSuspiciousProcesses pass with a second full CreateToolhelp32Snapshot walk;
+// now called once per PID from inside CollectSystemMemoryFindings's existing loop.
+// Findings format (f.process without the " [pid]" suffix, f.address as "PID:N")
+// intentionally matches what CollectSuspiciousProcesses used to produce, and this
+// function is not subject to CollectSystemMemoryFindings' kMaxSysmemFindings cap —
+// callers append its output to a separate, uncapped vector, same as before.
+static void EvaluateSuspiciousProcessHeuristics(DWORD pid, const std::wstring& rawExeName,
+                                                const std::wstring& fullPath, bool signedOk,
+                                                DetectionFilter::PathClass cls,
+                                                std::vector<ScannerUI::EmulatorFinding>& out) {
+    bool nameMatch = HasSuspiciousProcessToken(rawExeName);
+    bool tempOrInstallerPath = cls == DetectionFilter::PathClass::TempOrInstaller;
+    bool userProfilePath = cls == DetectionFilter::PathClass::UserProfile;
+
+    if (nameMatch) {
+        ScannerUI::EmulatorFinding f;
+        f.process = WideToUtf8(rawExeName);
+        f.type = kTagMapper;
+        f.address = "PID:" + std::to_string(pid);
+        f.detail = "name=blacklisted | signed=" + std::string(signedOk ? "yes" : "no") +
+                   " | path=" + WideToUtf8(fullPath.empty() ? L"unknown" : fullPath);
+        f.severity = "HIGH";
+        out.push_back(f);
+        return;
+    }
+
+    if (!signedOk && !fullPath.empty() && tempOrInstallerPath &&
+        !IsKnownDeveloperToolProcess(rawExeName)) {
+        double entropy = DetectionFilter::FileEntropySample(fullPath);
+        bool packed = entropy >= DetectionFilter::kPackedEntropy;
+        if (!packed)
+            return;
+        ScannerUI::EmulatorFinding f;
+        f.process = WideToUtf8(rawExeName);
+        f.type = kTagMapper;
+        f.address = "PID:" + std::to_string(pid);
+        f.detail = "unsigned packed process in temp/installer path | entropy=" +
+                   DetectionFilter::EntropyToStr(entropy) +
+                   " | path=" + WideToUtf8(fullPath);
+        f.severity = "MEDIUM";
+        out.push_back(f);
+    } else if (!signedOk && !fullPath.empty() && userProfilePath &&
+               !IsBenignUserLaunchPath(fullPath) &&
+               !IsKnownDeveloperToolProcess(rawExeName)) {
+        double entropy = DetectionFilter::FileEntropySample(fullPath);
+        bool packed = entropy >= DetectionFilter::kPackedEntropy;
+        if (!packed)
+            return;
+        ScannerUI::EmulatorFinding f;
+        f.process = WideToUtf8(rawExeName);
+        f.type = kTagMapper;
+        f.address = "PID:" + std::to_string(pid);
+        f.detail = "unsigned packed process in user profile path | entropy=" +
+                   DetectionFilter::EntropyToStr(entropy) +
+                   " | path=" + WideToUtf8(fullPath);
+        f.severity = "MEDIUM";
+        out.push_back(f);
+    }
 }

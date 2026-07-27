@@ -93,6 +93,8 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <AdditionalIncludeDirectories>$(ProjectDir)imgui;$(ProjectDir)imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <Optimization>MaxSpeed</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
@@ -136,6 +138,8 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <AdditionalIncludeDirectories>$(ProjectDir)imgui;$(ProjectDir)imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <Optimization>MaxSpeed</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
@@ -170,12 +174,14 @@
     <ClCompile Include="scanner_events_services.cpp" />
     <ClCompile Include="scanner_generic_bypass.cpp" />
     <ClCompile Include="scanner_stream_mods.cpp" />
+    <ClCompile Include="scanner_deepscan.cpp" />
     <ClCompile Include="scanner_network.cpp" />
     <ClCompile Include="scanner_usn_export.cpp" />
     <ClCompile Include="scanner_export.cpp" />
     <ClCompile Include="scanner_drivers.cpp" />
     <ClCompile Include="scanner_runner.cpp" />
-    <ClCompile Include="scanner_upload.cpp" />
+    <ClCompile Include="embedded_driver.cpp" />
+    <ClCompile Include="rtcore64_driver.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />
@@ -187,9 +193,10 @@
   <ItemGroup>
     <ClInclude Include="scanner_core.h" />
     <ClInclude Include="scanner_ui.h" />
-    <ClInclude Include="scanner_upload.h" />
     <ClInclude Include="detection_filters.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="embedded_driver.h" />
+    <ClInclude Include="rtcore64_driver.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="assets\efi-checker.png" />
@@ -197,6 +204,8 @@
     <None Include="assets\general.png" />
     <None Include="assets\kernel-scan.png" />
     <None Include="assets\winscan.png" />
+    <None Include="assets\drivers\xvscreenS.sys" />
+    <None Include="assets\drivers\RTCore64.sys" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="scanner_assets.rc" />

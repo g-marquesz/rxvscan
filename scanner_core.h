@@ -38,8 +38,15 @@
 #include "scanner_ui.h"
 #include "detection_filters.h"
 
-extern std::atomic_bool g_scanSlow;
+enum class ScanTier : int { Light = 0, Busy = 1, Overloaded = 2 };
+
+extern std::atomic_bool g_scanSlow;   // true when tier == Overloaded (kept for the render loop)
 extern std::atomic_bool g_scanFinished;
+extern std::atomic_int  g_scanTier;   // ScanTier sampled every 500ms from live CPU/RAM/GPU usage
+
+// Call periodically from inside long-running scan loops (per-process, per-region, per-handle, ...)
+// to yield the CPU under load without slowing down the scan on an idle machine.
+void MaybePaceIteration(size_t& counter, size_t everyN);
 
 namespace ScanLimits {
     constexpr size_t kMaxBypassFindings    = 160;
@@ -49,6 +56,7 @@ namespace ScanLimits {
     constexpr DWORD  kProcessScanTimeoutMs = 3000;
     constexpr size_t kSignatureCacheMax    = 2048;
     constexpr size_t kMaxGfxHookFindings  =   24; // cap for VTable/inline hook findings
+    constexpr size_t kMaxDeepScanFindings =   96; // cap for DeepScan topics (PLScan, HJCScan)
 }
 
 namespace ScanTag {
@@ -105,6 +113,19 @@ struct SystemHandleInformationEx {
     SystemHandleEntry Handles[1];
 };
 
+// One NtQuerySystemInformation(SystemHandleInformation) fetch, shared by every
+// consumer within a scan run instead of each re-querying the whole system handle
+// table (which can be 50k-200k+ entries) from scratch.
+struct SystemHandleSnapshot {
+    std::vector<BYTE> buffer;
+    bool ok = false;
+    const SystemHandleInformationEx* Info() const {
+        return reinterpret_cast<const SystemHandleInformationEx*>(buffer.data());
+    }
+};
+const SystemHandleSnapshot& GetSystemHandleSnapshot();
+void ResetSystemHandleSnapshot();
+
 struct EmulatorRuntimeInfo {
     bool hdPlayerOpen = false;
     std::string openedAt = "-";
@@ -157,7 +178,8 @@ std::wstring ProcessBaseNameByPid(DWORD pid);
 std::wstring ProcessImageDirW(HANDLE process);
 std::wstring ProcessFullPathW(DWORD pid);
 std::vector<ScannerUI::EmulatorFinding> CollectEmulatorIntegrityFindings();
-std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(std::string& status);
+std::vector<ScannerUI::EmulatorFinding> CollectSystemMemoryFindings(
+    std::string& status, std::vector<ScannerUI::EmulatorFinding>& suspiciousProcessFindings);
 
 std::wstring ExtractXmlTag(const std::wstring& xml, const std::wstring& tag);
 std::wstring ExtractXmlAttribute(const std::wstring& xml, const std::wstring& marker, const std::wstring& attr);
@@ -180,6 +202,7 @@ std::vector<ScannerUI::GenericBypassFinding> CollectGenericBypassFindings(std::s
 std::vector<ScannerUI::GenericBypassFinding> CollectWfpStreamFilterFindings(std::string& status);
 std::vector<ScannerUI::StreamModFinding>     CollectStreamModFindings(std::string& status);
 std::vector<ScannerUI::RemotePortFinding>    CollectRemotePortFindings(std::string& status);
+std::vector<ScannerUI::DeepScanFinding>      CollectDeepScanFindings(std::string& status);
 bool ExportUsnCsvForCommand(const std::string& command, std::string& message);
 void ExportScanReportToZ(ScannerUI::ScanData& data);
 
@@ -187,9 +210,11 @@ std::vector<ScannerUI::KernelDriverFinding> CollectKernelDriverFindings(std::str
 std::vector<ScannerUI::RegistryFinding>     CollectRegistryPersistenceFindings(std::string& status);
 std::vector<ScannerUI::ClsidFinding>        CollectClsidHijackFindings(std::string& status);
 bool                                        CleanClsidFinding(ScannerUI::ClsidFinding& finding);
-std::vector<ScannerUI::EmulatorFinding> CollectSuspiciousProcesses(std::string& status);
+std::vector<ScannerUI::EmulatorFinding> CollectDkomAnomalies();
 std::vector<ScannerUI::DriverIntegrityFinding> CollectDriverIntegrityFindings(std::string& status);
 std::vector<ScannerUI::KernelAnomalyFinding>   CollectKernelAnomalies(std::string& status);
+
+
 
 void AppendTerminalLine(ScannerUI::ScanData& data, const std::string& line);
 void RunTerminalCommandAsync(const std::string& command, ScannerUI::ScanData& data, std::mutex& dataMutex);

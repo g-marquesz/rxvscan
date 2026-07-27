@@ -950,9 +950,51 @@ static std::wstring ResolveWfpServiceDriverPath(const std::wstring& serviceName)
         }
         else if (driverPath.rfind(L"\\??\\", 0) == 0)
             driverPath = driverPath.substr(4);
+
+        // Service ImagePath values commonly include arguments (for example,
+        // svchost.exe -k LocalServiceNoNetworkFirewall). Verify the executable,
+        // not the complete command line.
+        while (!driverPath.empty() && iswspace(driverPath.front()))
+            driverPath.erase(driverPath.begin());
+        if (!driverPath.empty() && driverPath.front() == L'"') {
+            size_t closingQuote = driverPath.find(L'"', 1);
+            if (closingQuote != std::wstring::npos)
+                driverPath = driverPath.substr(1, closingQuote - 1);
+        } else {
+            std::wstring upper = ToUpperInvariant(driverPath);
+            size_t exeEnd = upper.find(L".EXE");
+            size_t sysEnd = upper.find(L".SYS");
+            size_t imageEnd = std::wstring::npos;
+            if (exeEnd != std::wstring::npos)
+                imageEnd = exeEnd + 4;
+            if (sysEnd != std::wstring::npos)
+                imageEnd = imageEnd == std::wstring::npos
+                    ? sysEnd + 4
+                    : (std::min)(imageEnd, sysEnd + 4);
+            if (imageEnd != std::wstring::npos)
+                driverPath.resize(imageEnd);
+        }
     }
     RegCloseKey(hSvc);
     return driverPath;
+}
+
+static bool IsKnownWindowsWfpServiceImage(const std::wstring& serviceName,
+                                          const std::wstring& imagePath) {
+    const std::wstring serviceUpper = ToUpperInvariant(serviceName);
+    const std::wstring imageUpper = ToUpperInvariant(BaseNameFromPath(imagePath));
+    return ((serviceUpper == L"MPSSVC" || serviceUpper == L"BFE") &&
+            imageUpper == L"SVCHOST.EXE") ||
+           (serviceUpper == L"NDU" && imageUpper == L"NDU.SYS");
+}
+
+static bool HasMicrosoftWfpMetadata(const std::string& providerName,
+                                    const std::string& sublayerName) {
+    std::string metadata = providerName + " " + sublayerName;
+    std::transform(metadata.begin(), metadata.end(), metadata.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return metadata.find("MICROSOFT") != std::string::npos ||
+           metadata.find("@BFE.DLL,") != std::string::npos;
 }
 
 static bool IsWfpDriverPathHighRisk(const std::wstring& path) {
@@ -1199,9 +1241,7 @@ static void AppendNdisNetworkServiceFindings(
             finding.confidence = "MEDIUM";
             finding.evidenceState = "REVIEW";
         } else {
-            finding.severity = "FLAG";
-            finding.confidence = "HIGH";
-            finding.evidenceState = "TRUSTED_THIRD_PARTY";
+            continue;
         }
         finding.detail =
             "service=" + WideToUtf8(service) +
@@ -1308,11 +1348,17 @@ CollectWfpStreamFilterFindings(std::string& status) {
                 const bool microsoftBuiltinWithoutService =
                     driverPath.empty() && serviceName.empty() &&
                     providerUpper.find("MICROSOFT") != std::string::npos;
+                const bool microsoftBuiltinService =
+                    IsKnownWindowsWfpServiceImage(serviceName, driverPath) &&
+                    HasMicrosoftWfpMetadata(providerName, sublayerName);
 
                 std::string severity;
                 std::string confidence;
                 std::string evidenceState;
-                if (pathExists && !trusted && (highRiskPath || bootTime)) {
+                if (microsoftBuiltinWithoutService || microsoftBuiltinService) {
+                    FwpmFreeMemory0(reinterpret_cast<void**>(&callout));
+                    continue;
+                } else if (pathExists && !trusted && (highRiskPath || bootTime)) {
                     severity = "HIGH";
                     confidence = "HIGH";
                     evidenceState = "SUSPICIOUS";
@@ -1320,19 +1366,15 @@ CollectWfpStreamFilterFindings(std::string& status) {
                     severity = "MEDIUM";
                     confidence = "MEDIUM";
                     evidenceState = "REVIEW";
-                } else if (microsoftBuiltinWithoutService) {
-                    FwpmFreeMemory0(reinterpret_cast<void**>(&callout));
-                    continue;
                 } else if (!pathExists || driverPath.empty()) {
                     severity = "FLAG";
                     confidence = "LOW";
                     evidenceState = "INCONCLUSIVE";
                 } else if (trusted && !microsoft) {
-                    // VPNs, endpoint security and third-party firewalls routinely
-                    // register stream callouts. Preserve inventory without accusing.
-                    severity = "FLAG";
-                    confidence = "HIGH";
-                    evidenceState = "TRUSTED_THIRD_PARTY";
+                    // Signed VPN, endpoint-security and firewall filters are normal
+                    // inventory, not bypass evidence.
+                    FwpmFreeMemory0(reinterpret_cast<void**>(&callout));
+                    continue;
                 } else {
                     FwpmFreeMemory0(reinterpret_cast<void**>(&callout));
                     continue;

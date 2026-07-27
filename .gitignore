@@ -2,6 +2,8 @@
 x64/
 Debug/
 Release/
+c++/Release/
+c++/x64/
 *.user
 *.suo
 *.VC.db
@@ -18,3 +20,14 @@ Release/
 *.exp
 *.log
 imgui.ini
+
+# Web app (portfolio = C++ scanner only)
+rxvscan-web/
+
+# Local agent / IDE helpers
+.agents/
+.claude/
+
+# Vulnerable/kernel driver binaries — keep local, do not publish
+*.sys
+assets/drivers/

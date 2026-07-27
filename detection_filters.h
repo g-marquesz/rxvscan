@@ -8,6 +8,7 @@
 #include <imagehlp.h>
 #pragma comment(lib, "imagehlp.lib")
 #include <bcrypt.h>
+#include <psapi.h>
 #include <iomanip>
 #include <sstream>
 
@@ -26,6 +27,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// Defined in scanner_platform.cpp, declared in scanner_core.h — forward-declared here
+// because detection_filters.h is included by scanner_core.h before that declaration.
+std::wstring DevicePathToDosPath(const std::wstring& path);
 
 namespace DetectionFilter {
 
@@ -288,10 +293,14 @@ inline bool ExportsGraphicsSymbol(const BYTE* peBase, SIZE_T peSize, uintptr_t /
 
     static const char* kGfxSymbols[] = {
         "wglSwapBuffers", "glDrawElements", "glDrawArrays", "glDepthFunc",
-        "eglSwapBuffers", "SwapBuffers", "D3D11CreateDevice",
+        "glDrawRangeElements", "glBindTexture", "glUseProgram", "glUniform4f",
+        "glUniform4fv", "glEnable", "glDisable", "glBlendFunc", "glStencilFunc",
+        "glPolygonMode", "eglSwapBuffers", "eglMakeCurrent", "eglGetProcAddress",
+        "SwapBuffers", "D3D11CreateDevice",
         "D3D11CreateDeviceAndSwapChain", "CreateDXGIFactory",
         "CreateDXGIFactory1", "CreateDXGIFactory2",
-        "vkQueuePresentKHR", "wglGetProcAddress", "glGetProcAddress",
+        "vkQueuePresentKHR", "vkCmdDraw", "vkCmdDrawIndexed",
+        "vkCreateGraphicsPipelines", "wglGetProcAddress", "glGetProcAddress",
         nullptr
     };
 
@@ -1018,15 +1027,38 @@ inline bool IsTrustedSigned(const std::wstring& path) {
     return r.value_or(false);
 }
 
+// Fingerprint (size + last-write-time) used to validate cached Authenticode/publisher
+// results across scans: a cache hit is only honored if the file on disk still matches
+// the fingerprint recorded when it was verified. If the file changed (e.g. malware
+// patched a binary between two scans in the same session) the fingerprint differs and
+// the entry is treated as a miss, so it gets re-verified — caching never hides a
+// genuine change. Returns 0 (never cached) if the file can't be stat'd.
+inline uint64_t GetFileFingerprint(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA attr = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attr))
+        return 0;
+    ULARGE_INTEGER size = {};
+    size.LowPart  = attr.nFileSizeLow;
+    size.HighPart = attr.nFileSizeHigh;
+    ULARGE_INTEGER mtime = {};
+    mtime.LowPart  = attr.ftLastWriteTime.dwLowDateTime;
+    mtime.HighPart = attr.ftLastWriteTime.dwHighDateTime;
+    uint64_t h = size.QuadPart;
+    h ^= mtime.QuadPart + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    return h != 0 ? h : 1; // reserve 0 for "unknown/uncacheable"
+}
+
 namespace detail_sigcache {
+    struct Entry { bool value; uint64_t fingerprint; };
     inline std::mutex& Mtx() { static std::mutex m; return m; }
-    inline std::unordered_map<std::wstring, bool>& Map() {
-        static std::unordered_map<std::wstring, bool> c; return c;
+    inline std::unordered_map<std::wstring, Entry>& Map() {
+        static std::unordered_map<std::wstring, Entry> c; return c;
     }
 }
 
-// Thread-safe per-scan cache for Authenticode results.
-// Eliminates repeated WinVerifyTrust calls on the same path within a scan session.
+// Cache for Authenticode results, valid across scans within the same process lifetime
+// (see GetFileFingerprint for the change-detection rule that keeps this correct).
+// Eliminates repeated WinVerifyTrust calls on the same, unchanged path.
 // Only definitive results (signed=true or genuinely unsigned=false) are cached.
 // Timeouts return false to the caller but are NOT cached — otherwise a single slow
 // catalog warm-up would poison the cache and falsely mark hundreds of catalog-signed
@@ -1034,32 +1066,76 @@ namespace detail_sigcache {
 inline bool IsTrustedSignedCached(const std::wstring& path) {
     if (path.empty())
         return false;
-    {
+    uint64_t fp = GetFileFingerprint(path);
+    if (fp != 0) {
         std::lock_guard<std::mutex> lk(detail_sigcache::Mtx());
         auto it = detail_sigcache::Map().find(path);
-        if (it != detail_sigcache::Map().end())
-            return it->second;
+        if (it != detail_sigcache::Map().end() && it->second.fingerprint == fp)
+            return it->second.value;
     }
     auto tri = IsTrustedSignedTriState(path);
     bool result = tri.value_or(false);
-    if (tri.has_value()) {
+    if (tri.has_value() && fp != 0) {
         std::lock_guard<std::mutex> lk(detail_sigcache::Mtx());
         if (detail_sigcache::Map().size() < 2048)
-            detail_sigcache::Map()[path] = result;
+            detail_sigcache::Map()[path] = { result, fp };
     }
     return result;
 }
 
-// Call at the start of each scan to discard results from the previous run.
+// Kept for explicit "force full rescan" use (e.g. process startup); no longer required
+// between scans in the same session since entries self-invalidate on file change.
 inline void ClearSignatureCache() {
     std::lock_guard<std::mutex> lk(detail_sigcache::Mtx());
     detail_sigcache::Map().clear();
 }
 
+struct AddressModuleTrust {
+    bool resolved = false;        // a live file mapping backs this address (MEM_IMAGE/MEM_MAPPED)
+    bool signedTrusted = false;   // IsTrustedSignedCached(path)
+    bool exportsGraphics = false; // content-based ExportsGraphicsSymbol on the in-memory header
+    std::wstring path;            // resolved DOS path; empty if unresolved
+};
+
+// Resolves the on-disk image (if any) backing the memory region containing `addr` in
+// `process`, INDEPENDENT of any previously-captured module snapshot (CollectProcessModules
+// is a point-in-time snapshot; a legitimately signed DLL loaded after that snapshot, or
+// manually mapped as a real section, would otherwise look identical to injected shellcode).
+// Pure MEM_PRIVATE memory has no backing file and correctly returns resolved=false — that
+// is NOT itself a trust signal, only the absence of one.
+inline AddressModuleTrust ResolveModuleTrustAtAddress(HANDLE process, uintptr_t addr) {
+    AddressModuleTrust result;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQueryEx(process, (LPCVOID)addr, &mbi, sizeof(mbi)) != sizeof(mbi))
+        return result;
+    if (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED)
+        return result; // MEM_PRIVATE — genuinely no backing file
+
+    wchar_t devicePath[1024] = {};
+    DWORD len = GetMappedFileNameW(process, mbi.AllocationBase, devicePath, (DWORD)std::size(devicePath));
+    if (len == 0)
+        return result;
+
+    result.path = DevicePathToDosPath(devicePath);
+    result.resolved = !result.path.empty();
+    if (!result.resolved)
+        return result;
+
+    result.signedTrusted = IsTrustedSignedCached(result.path);
+    if (result.signedTrusted) {
+        BYTE header[4096] = {};
+        SIZE_T got = 0;
+        if (ReadProcessMemory(process, mbi.AllocationBase, header, sizeof(header), &got) && got >= 0x40)
+            result.exportsGraphics = ExportsGraphicsSymbol(header, got, (uintptr_t)mbi.AllocationBase);
+    }
+    return result;
+}
+
 namespace detail_pubcache {
+    struct Entry { std::wstring value; uint64_t fingerprint; };
     inline std::mutex& Mtx() { static std::mutex m; return m; }
-    inline std::unordered_map<std::wstring, std::wstring>& Map() {
-        static std::unordered_map<std::wstring, std::wstring> c; return c;
+    inline std::unordered_map<std::wstring, Entry>& Map() {
+        static std::unordered_map<std::wstring, Entry> c; return c;
     }
 }
 
@@ -1070,11 +1146,12 @@ namespace detail_pubcache {
 inline std::wstring GetSignerCommonNameUpperCached(const std::wstring& path) {
     if (path.empty())
         return L"";
-    {
+    uint64_t fp = GetFileFingerprint(path);
+    if (fp != 0) {
         std::lock_guard<std::mutex> lk(detail_pubcache::Mtx());
         auto it = detail_pubcache::Map().find(path);
-        if (it != detail_pubcache::Map().end())
-            return it->second;
+        if (it != detail_pubcache::Map().end() && it->second.fingerprint == fp)
+            return it->second.value;
     }
 
     std::wstring name;
@@ -1111,14 +1188,15 @@ inline std::wstring GetSignerCommonNameUpperCached(const std::wstring& path) {
     }
     name = UpperW(name);
 
-    {
+    if (fp != 0) {
         std::lock_guard<std::mutex> lk(detail_pubcache::Mtx());
         if (detail_pubcache::Map().size() < 2048)
-            detail_pubcache::Map()[path] = name;
+            detail_pubcache::Map()[path] = { name, fp };
     }
     return name;
 }
 
+// Kept for explicit "force full rescan" use; entries self-invalidate on file change.
 inline void ClearPublisherCache() {
     std::lock_guard<std::mutex> lk(detail_pubcache::Mtx());
     detail_pubcache::Map().clear();
@@ -1473,9 +1551,10 @@ inline std::string GetSignerRootThumbprint(const std::wstring& path) {
 }
 
 namespace detail_identcache {
+    struct Entry { VerifiedSignerIdentity value; uint64_t fingerprint; };
     inline std::mutex& Mtx() { static std::mutex m; return m; }
-    inline std::unordered_map<std::wstring, VerifiedSignerIdentity>& Map() {
-        static std::unordered_map<std::wstring, VerifiedSignerIdentity> c; return c;
+    inline std::unordered_map<std::wstring, Entry>& Map() {
+        static std::unordered_map<std::wstring, Entry> c; return c;
     }
 }
 
@@ -1485,25 +1564,27 @@ inline VerifiedSignerIdentity GetVerifiedSignerIdentityCached(const std::wstring
     VerifiedSignerIdentity id;
     if (path.empty())
         return id;
-    {
+    uint64_t fp = GetFileFingerprint(path);
+    if (fp != 0) {
         std::lock_guard<std::mutex> lk(detail_identcache::Mtx());
         auto it = detail_identcache::Map().find(path);
-        if (it != detail_identcache::Map().end())
-            return it->second;
+        if (it != detail_identcache::Map().end() && it->second.fingerprint == fp)
+            return it->second.value;
     }
     if (IsTrustedSignedCached(path)) {
         id.trusted   = true;
         id.cnUpper   = GetSignerCommonNameUpperCached(path);
         id.rootThumb = GetSignerRootThumbprint(path);
     }
-    {
+    if (fp != 0) {
         std::lock_guard<std::mutex> lk(detail_identcache::Mtx());
         if (detail_identcache::Map().size() < 2048)
-            detail_identcache::Map()[path] = id;
+            detail_identcache::Map()[path] = { id, fp };
     }
     return id;
 }
 
+// Kept for explicit "force full rescan" use; entries self-invalidate on file change.
 inline void ClearIdentityCache() {
     std::lock_guard<std::mutex> lk(detail_identcache::Mtx());
     detail_identcache::Map().clear();

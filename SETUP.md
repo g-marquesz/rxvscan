@@ -43,20 +43,6 @@ Troque por um `ScanData` que você preenche com os resultados reais do scan
 (serviços, HWID, BAM, prefetch, etc). Os campos estão documentados no topo do
 `scanner_ui.h`.
 
-## Login por Discord
-
-O login usa um PIN de 6 digitos enviado por webhook. Por seguranca, a URL nao fica
-gravada no executavel. Depois de regenerar o webhook no Discord, configure:
-
-```powershell
-$env:RXVSCAN_DISCORD_WEBHOOK = "https://discord.com/api/webhooks/SEU_ID/SEU_TOKEN"
-.\x64\Release\c++.exe
-```
-
-O PIN expira em 5 minutos e aceita no maximo 5 tentativas. Quando o scan termina,
-o webhook recebe um resumo organizado com dispositivo, sistema, HWID e contagens
-de WinScan, Bypass, Forensics, Persistence, Emulador e Sysmon.
-
 ## Observações de fidelidade
 - Os "✓/✗" são desenhados à mão (linhas) porque a fonte padrão do ImGui não tem
   esses glifos. Se quiser ícones bonitos (pasta, alerta, cópia), carregue uma
